@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-daily"
+version = "0.1.0"
+description = "Daily arXiv fetch and assistant workflow support."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+arxiv-daily = "arxiv_daily.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pylint.main]
+py-version = "3.11"
+source-roots = ["src"]
+ignore-paths = [".conda", "data"]
+persistent = false
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.messages_control]
+disable = [
+  "missing-module-docstring",
+  "missing-class-docstring",
+  "missing-function-docstring",
+  "too-few-public-methods",
+  "too-many-arguments",
+  "too-many-instance-attributes",
+  "too-many-locals",
+]

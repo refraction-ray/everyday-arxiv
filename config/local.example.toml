@@ -1,0 +1,11 @@
+# Copy this file to config/local.toml for private machine- or user-specific overrides.
+# config/local.toml is gitignored.
+
+[arxiv]
+# default_categories = ["quant-ph", "cond-mat.mes-hall"]
+# max_results = 300
+
+[paths]
+# raw_arxiv_dir = "data/raw/arxiv"
+# reports_dir = "data/reports"
+# user_profile_dir = "user_profile"

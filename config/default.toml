@@ -1,0 +1,13 @@
+[arxiv]
+base_url = "https://export.arxiv.org/api/query"
+default_categories = ["quant-ph"]
+max_results = 200
+page_size = 100
+sort_by = "submittedDate"
+sort_order = "descending"
+request_timeout_seconds = 30
+
+[paths]
+raw_arxiv_dir = "data/raw/arxiv"
+reports_dir = "data/reports"
+user_profile_dir = "user_profile"
