@@ -5,9 +5,12 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from xml.etree.ElementTree import ParseError
 
-from .arxiv_client import build_search_query, fetch_papers
+from .arxiv_client import build_search_query, fetch_papers, fetch_papers_from_html
 from .config import load_config
+from .models import Paper
 from .scholar_client import bootstrap_scholar_profile
 
 
@@ -46,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch.add_argument(
         "--dry-run", action="store_true", help="Print query and output path without network access."
+    )
+    fetch.add_argument(
+        "--source",
+        choices=["auto", "api", "html"],
+        default="auto",
+        help="Metadata source. auto uses the arXiv API first, then arxiv.org HTML search.",
     )
 
     profile = subparsers.add_parser("profile", help="Initialize or update local user profile files")
@@ -118,19 +127,18 @@ def run_fetch(args: argparse.Namespace) -> int:
             "output_path": str(output_path),
             "max_results": max_results,
             "page_size": page_size,
+            "source": args.source,
         }
         print(json.dumps(preview_url, indent=2, ensure_ascii=False))
         return 0
 
-    query, papers = fetch_papers(
-        base_url=str(arxiv_config["base_url"]),
+    query, papers, source, fallback_error = _fetch_with_source(
+        source=args.source,
+        arxiv_config=arxiv_config,
         categories=categories,
         target_date=target_date,
         max_results=max_results,
         page_size=page_size,
-        sort_by=str(arxiv_config["sort_by"]),
-        sort_order=str(arxiv_config["sort_order"]),
-        timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
     )
 
     payload = {
@@ -138,10 +146,13 @@ def run_fetch(args: argparse.Namespace) -> int:
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "date": target_date.isoformat(),
         "categories": categories,
+        "source": source,
         "query": query,
         "count": len(papers),
         "papers": [paper.to_dict() for paper in papers],
     }
+    if fallback_error:
+        payload["fallback_error"] = fallback_error
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -149,6 +160,48 @@ def run_fetch(args: argparse.Namespace) -> int:
     )
     print(f"Wrote {len(papers)} papers to {output_path}")
     return 0
+
+
+def _fetch_with_source(
+    *,
+    source: str,
+    arxiv_config: dict[str, Any],
+    categories: list[str],
+    target_date: date,
+    max_results: int,
+    page_size: int,
+) -> tuple[str, list[Paper], str, str | None]:
+    if source == "html":
+        query, papers = fetch_papers_from_html(
+            categories=categories,
+            target_date=target_date,
+            max_results=max_results,
+            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
+        )
+        return query, papers, "html", None
+
+    try:
+        query, papers = fetch_papers(
+            base_url=str(arxiv_config["base_url"]),
+            categories=categories,
+            target_date=target_date,
+            max_results=max_results,
+            page_size=page_size,
+            sort_by=str(arxiv_config["sort_by"]),
+            sort_order=str(arxiv_config["sort_order"]),
+            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
+        )
+        return query, papers, "api", None
+    except (HTTPError, URLError, OSError, ParseError, ValueError) as exc:
+        if source == "api":
+            raise
+        query, papers = fetch_papers_from_html(
+            categories=categories,
+            target_date=target_date,
+            max_results=max_results,
+            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
+        )
+        return query, papers, "html", f"arXiv API failed before HTML fallback: {exc}"
 
 
 def run_profile(args: argparse.Namespace) -> int:

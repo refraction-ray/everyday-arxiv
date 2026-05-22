@@ -30,6 +30,7 @@ Specific operational workflows are implemented as project-local skills:
 
 - `.agents/skills/user-bootstrap/SKILL.md`: initialize `user_profile/` from Google Scholar or user-provided publication data and generate research interests.
 - `.agents/skills/arxiv-daily/SKILL.md`: fetch arXiv papers, recommend papers, do close reading, run citation checks, and write reports.
+- `.agents/skills/feedback-memory/SKILL.md`: record sparse user feedback on papers and ideas, update idea status, and promote stable feedback patterns into the private research profile.
 
 Keep `agents.md` focused on project-wide environment, privacy boundaries, and high-level architecture. Put detailed daily workflow rules in the corresponding Skill.
 
@@ -51,7 +52,7 @@ Use the project-local Conda environment when running Python tooling:
 conda activate .conda/arxiv-daily
 ```
 
-The environment is defined by `environment.yml` and should include Python 3.11, Black, Pylint, and pip.
+The environment is defined by `environment.yml` and should include Python 3.11, pytest, Black, Pylint, and pip.
 
 For commands that do not activate the environment, use the environment's Python directly:
 
@@ -62,7 +63,8 @@ For commands that do not activate the environment, use the environment's Python 
 Before handing off code changes, run:
 
 ```bash
-.conda/arxiv-daily/bin/black --check src
+.conda/arxiv-daily/bin/pytest -q tests
+.conda/arxiv-daily/bin/black --check src tests
 .conda/arxiv-daily/bin/pylint src/arxiv_daily
 ```
 
@@ -77,3 +79,4 @@ If package metadata is needed for console scripts or imports without `PYTHONPATH
 - Default arXiv category: `quant-ph`.
 - Default date: local current date used by the CLI.
 - arXiv date filtering uses `submittedDate` ranges in `YYYYMMDD0000` to `YYYYMMDD2359`.
+- When the HTML fallback is used, only papers whose first version (`v1 submitted`) matches the target date should be included; later revisions on that date are not part of the daily first-submission batch.

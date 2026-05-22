@@ -15,10 +15,11 @@ cd everyday-arxiv
 
 Then open your AI agent on this folder and talk to it in natural language.
 
-You mainly need to know two workflows:
+You mainly need to know three workflows:
 
 - `Bootstrap`: set up your private research profile from Google Scholar, BibTeX, paper lists, or your own notes.
 - `Daily ArXiv`: fetch papers for today or a specified date, recommend what is worth reading, optionally do close reading, generate promising research ideas, and check for missing citations.
+- `Feedback Memory`: when you react to a paper or idea, the agent records a simple positive/neutral/negative score and only promotes stable patterns into your long-term profile.
 
 Everything else is implementation detail for the agent.
 
@@ -81,6 +82,7 @@ The repository gives the agent a stable workspace:
 - deterministic Python tools for arXiv metadata fetching and Google Scholar bootstrap,
 - private local profile files under `user_profile/*.local.*`,
 - project-local skills for `user-bootstrap` and `arXiv-daily`,
+- a project-local `feedback-memory` skill for sparse paper and idea feedback,
 - local report and cache folders ignored by Git.
 
 You should not need to memorize the commands. If you are curious, the agent-facing instructions live in `agents.md`.
@@ -93,9 +95,10 @@ Public files define the reusable workflow. Private files define you.
 
 ## Current Status
 
-Everyday ArXiv currently provides the agent-ready workspace, profile bootstrap tooling, arXiv metadata fetching, privacy boundaries, and two project skills:
+Everyday ArXiv currently provides the agent-ready workspace, profile bootstrap tooling, arXiv metadata fetching, privacy boundaries, and three project skills:
 
 - `user-bootstrap`
 - `arxiv-daily`
+- `feedback-memory`
 
 Full recommendation, close-reading, idea generation, and citation-check judgment is performed by the AI agent, using the local profile and cached paper metadata as context.
