@@ -119,6 +119,8 @@ Use shorter summaries for weaker matches or when the abstract is sufficient.
 
 Generate research ideas sparsely, only for genuinely promising papers. Good ideas combine the new paper's system, technique, or observation with a user-specific method, prior work, setup, or implementation route. Avoid generic extensions such as adding noise, changing systems, or doing larger numerics without a concrete nontrivial reason.
 
+Idea records should be specific enough to retrieve and refine later. Define the proposed diagnostic, model, comparison class, observable, or first calculation instead of only naming a broad theme. When an idea relies on close-reading evidence, report notes, or a specific section of a paper, include a concise provenance pointer in `notes` or a similar field, such as the recommendation report date, local note section, source arXiv ID, paper section name, or inspected file snippet.
+
 When a high-value idea is included and persistent idea tracking exists or is requested, append a concise record to `user_profile/ideas.local.jsonl` using `user_profile/ideas.example.jsonl` as the schema:
 
 - `source_arxiv_ids`

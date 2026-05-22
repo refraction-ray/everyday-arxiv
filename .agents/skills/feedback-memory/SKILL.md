@@ -55,6 +55,10 @@ Only include extra fields when they are directly useful for disambiguation, such
 
 When feedback targets an idea, update the matching record in `user_profile/ideas.local.jsonl` if it exists.
 
+During discussion of an existing idea, also refine the idea record when the user clarifies the scientific question, diagnostic, model, observable, implementation route, novelty, or provenance. Do this even when the user is not giving positive or negative evaluative feedback. In that case, update fields such as `summary`, `novelty_reason`, `actionability`, `notes`, or a concise `feedback` note, but do not append a scored feedback record unless the user actually evaluates the idea.
+
+Preserve the original source and intent while refining. Prefer additive or clarifying edits over replacing the idea wholesale; keep enough provenance in `notes` to recover why the idea was generated and which discussion refined it.
+
 Maintain these fields when possible:
 
 - `feedback_score`: cumulative integer score for that idea.
