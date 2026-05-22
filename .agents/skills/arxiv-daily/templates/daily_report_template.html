@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Everyday arXiv 推荐</title>
+  <style>
+    :root {
+      --bg-color: #f8f9fa;
+      --card-bg: #ffffff;
+      --text-main: #212529;
+      --text-muted: #6c757d;
+      --primary: #2b6cb0;
+      --accent-high: #e53e3e;
+      --accent-med: #dd6b20;
+      --accent-low: #319795;
+      --border-color: #e2e8f0;
+      --code-bg: #f1f5f9;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      color: var(--text-main);
+      background: var(--bg-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.6;
+    }
+
+    a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    header {
+      margin-bottom: 30px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--primary);
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      color: var(--primary);
+    }
+
+    h2 {
+      margin: 28px 0 14px;
+    }
+
+    .meta-info {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+
+    .idea-box,
+    .citation-box {
+      margin-bottom: 30px;
+      padding: 20px;
+      background: #ebf8ff;
+      border-left: 4px solid var(--primary);
+      border-radius: 4px;
+    }
+
+    .citation-box {
+      background: #fffaf0;
+      border-left-color: var(--accent-med);
+    }
+
+    .summary-table {
+      width: 100%;
+      margin-bottom: 30px;
+      overflow: hidden;
+      background: var(--card-bg);
+      border-collapse: collapse;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    }
+
+    .summary-table th,
+    .summary-table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+      vertical-align: top;
+    }
+
+    .summary-table th {
+      background: #edf2f7;
+    }
+
+    .summary-table tr:hover td {
+      background: #f7fafc;
+    }
+
+    .paper-card {
+      margin-bottom: 20px;
+      padding: 20px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+      scroll-margin-top: 18px;
+    }
+
+    .paper-header {
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px dashed var(--border-color);
+    }
+
+    .paper-title {
+      margin: 0 0 5px;
+      color: #1a202c;
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    .paper-authors {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      font-style: italic;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 4px 8px;
+      color: #ffffff;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .priority-high {
+      background: var(--accent-high);
+    }
+
+    .priority-med {
+      background: var(--accent-med);
+    }
+
+    .priority-low {
+      background: var(--accent-low);
+    }
+
+    .section-title {
+      margin: 10px 0 5px;
+      color: var(--primary);
+      font-weight: 700;
+    }
+
+    .action-box {
+      margin-top: 15px;
+      padding: 10px 15px;
+      background: #f7fafc;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    .email-draft {
+      padding: 14px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 700px) {
+      body {
+        padding: 12px;
+      }
+
+      .paper-header {
+        display: block;
+      }
+
+      .badge {
+        margin: 10px 0 0;
+      }
+
+      .summary-table th,
+      .summary-table td {
+        padding: 9px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Everyday arXiv 推荐</h1>
+      <div class="meta-info">Source date: {{SOURCE_DATE}} | Category: {{CATEGORY}} | Papers scanned: {{PAPER_COUNT}}</div>
+    </header>
+
+    <!-- Optional. Omit this whole block when there is no high-value idea. -->
+    <section class="idea-box">
+      <h2>{{IDEA_TITLE}}</h2>
+      <p>{{IDEA_SUMMARY}}</p>
+      <p><strong>Actionability:</strong> {{IDEA_ACTION}}</p>
+    </section>
+
+    <!-- Optional. Omit this whole block when there are no citation alerts. -->
+    <section class="citation-box">
+      <h2>Citation Alerts</h2>
+      <p>{{CITATION_ALERT_SUMMARY}}</p>
+    </section>
+
+    <h2>Top List</h2>
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>arXiv</th>
+          <th>Paper</th>
+          <th>Priority</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Repeat one row per recommended paper. The paper link must point to the matching card id below. -->
+        <tr>
+          <td>{{RANK}}</td>
+          <td><a href="https://arxiv.org/abs/{{ARXIV_ID_BARE}}" target="_blank" rel="noopener">{{ARXIV_ID_BARE}}</a></td>
+          <td><a href="#paper-{{ARXIV_ID_SLUG}}">{{PAPER_TITLE}}</a></td>
+          <td><span class="badge {{PRIORITY_CLASS}}">{{PRIORITY_LABEL}}</span></td>
+          <td>{{ACTION}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Details</h2>
+    <!-- Repeat one card per recommended paper. id must match the top-list anchor and use bare arXiv ID slug, e.g. paper-2605-22555. -->
+    <article class="paper-card" id="paper-{{ARXIV_ID_SLUG}}">
+      <div class="paper-header">
+        <div>
+          <h3 class="paper-title">{{RANK}}. <a href="https://arxiv.org/abs/{{ARXIV_ID_BARE}}" target="_blank" rel="noopener">{{PAPER_TITLE}}</a></h3>
+          <div class="paper-authors">{{AUTHORS}}</div>
+        </div>
+        <span class="badge {{PRIORITY_CLASS}}">{{PRIORITY_LABEL}}</span>
+      </div>
+
+      <div class="section-title">Why It Matters</div>
+      <p>{{WHY_IT_MATTERS}}</p>
+
+      <div class="section-title">User Connection</div>
+      <p>{{USER_CONNECTION}}</p>
+
+      <div class="section-title">Links</div>
+      <p>
+        <a href="https://arxiv.org/abs/{{ARXIV_ID_BARE}}" target="_blank" rel="noopener">Abstract page</a>
+        |
+        <a href="https://arxiv.org/pdf/{{ARXIV_ID_BARE}}" target="_blank" rel="noopener">PDF</a>
+      </p>
+
+      <div class="action-box">Suggested action: {{ACTION}}</div>
+    </article>
+
+    <!-- Optional citation section. Omit when no citation emails are needed. -->
+    <section class="paper-card" id="citation-{{ARXIV_ID_SLUG}}">
+      <h2>Citation Email Draft: <a href="https://arxiv.org/abs/{{ARXIV_ID_BARE}}" target="_blank" rel="noopener">{{ARXIV_ID_BARE}}</a></h2>
+      <div class="section-title">Reason</div>
+      <p>{{CITATION_REASON}}</p>
+      <div class="section-title">Draft</div>
+      <pre class="email-draft">{{EMAIL_DRAFT}}</pre>
+    </section>
+
+  </div>
+</body>
+</html>

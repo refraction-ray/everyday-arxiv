@@ -363,7 +363,7 @@ def _extract_abstract(result: str) -> str:
     abstract_block = _first_match(r'<p class="abstract mathjax">\s*(.*?)\s*</p>', result)
     if abstract_block is None:
         return ""
-    return _html_text(abstract_block).removeprefix("Abstract :").strip()
+    return re.sub(r"^Abstract\s*:\s*", "", _html_text(abstract_block)).strip()
 
 
 def _parse_submitted_date(result: str) -> date | None:

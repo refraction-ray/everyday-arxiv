@@ -50,5 +50,6 @@ def test_html_parser_keeps_first_submissions_from_submitted_date_batch():
 
     assert len(papers) == 1
     assert papers[0].arxiv_id == "2605.12345"
+    assert papers[0].summary == "First submission."
     assert papers[0].published.startswith("2026-05-14")
     assert papers[0].updated.startswith("2026-05-14")
