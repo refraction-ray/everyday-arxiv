@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Everyday arXiv 推荐 - Demo Preview</title>
+  <style>
+    :root {
+      --bg-color: #f8f9fa;
+      --card-bg: #ffffff;
+      --text-main: #212529;
+      --text-muted: #6c757d;
+      --primary: #2b6cb0;
+      --accent-high: #e53e3e;
+      --accent-med: #dd6b20;
+      --accent-low: #319795;
+      --border-color: #e2e8f0;
+      --code-bg: #f1f5f9;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      color: var(--text-main);
+      background: var(--bg-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.6;
+    }
+
+    a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    header {
+      margin-bottom: 30px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--primary);
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      color: var(--primary);
+    }
+
+    h2 {
+      margin: 28px 0 14px;
+    }
+
+    .meta-info {
+      color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+
+    .idea-box,
+    .citation-box {
+      margin-bottom: 30px;
+      padding: 20px;
+      background: #ebf8ff;
+      border-left: 4px solid var(--primary);
+      border-radius: 4px;
+    }
+
+    .citation-box {
+      background: #fffaf0;
+      border-left-color: var(--accent-med);
+    }
+
+    .summary-table {
+      width: 100%;
+      margin-bottom: 30px;
+      overflow: hidden;
+      background: var(--card-bg);
+      border-collapse: collapse;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    }
+
+    .summary-table th,
+    .summary-table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+      vertical-align: top;
+    }
+
+    .summary-table th {
+      background: #edf2f7;
+    }
+
+    .paper-card {
+      margin-bottom: 20px;
+      padding: 20px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+    }
+
+    .paper-header {
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px dashed var(--border-color);
+    }
+
+    .paper-title {
+      margin: 0 0 5px;
+      color: #1a202c;
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    .paper-authors {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      font-style: italic;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 4px 8px;
+      color: #ffffff;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .priority-high {
+      background: var(--accent-high);
+    }
+
+    .priority-med {
+      background: var(--accent-med);
+    }
+
+    .priority-low {
+      background: var(--accent-low);
+    }
+
+    .section-title {
+      margin: 10px 0 5px;
+      color: var(--primary);
+      font-weight: 700;
+    }
+
+    .action-box {
+      margin-top: 15px;
+      padding: 10px 15px;
+      background: #f7fafc;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    @media (max-width: 700px) {
+      body {
+        padding: 12px;
+      }
+
+      .paper-header {
+        display: block;
+      }
+
+      .badge {
+        margin: 10px 0 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Everyday arXiv 推荐</h1>
+      <div class="meta-info">Source date: 2026-05-21 | Category: quant-ph | Papers scanned: 42</div>
+    </header>
+
+    <section class="idea-box">
+      <h2>今日可行动想法</h2>
+      <p>把一篇新论文的测量诱导动力学与本地研究档案中的张量网络诊断结合，先做一个小规模可复现实验。</p>
+      <p><strong>Actionability:</strong> 复用本地代码，先检查纠缠增长、采样复杂度和可压缩性。</p>
+    </section>
+
+    <section class="citation-box">
+      <h2>Citation Alerts</h2>
+      <p>1 篇论文可能需要人工检查引用关系；报告会给出证据和邮件草稿，而不是直接发送。</p>
+    </section>
+
+    <h2>Top List</h2>
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>arXiv</th>
+          <th>Paper</th>
+          <th>Priority</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><a href="#">2605.12345</a></td>
+          <td><a href="#paper-2605-12345">Measurement-Induced Structure in Quantum Many-Body Dynamics</a></td>
+          <td><span class="badge priority-high">high</span></td>
+          <td>Read source and test the proposed diagnostic.</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><a href="#">2605.12346</a></td>
+          <td><a href="#paper-2605-12346">Efficient Tensor Compression for Open Quantum Systems</a></td>
+          <td><span class="badge priority-med">medium</span></td>
+          <td>Skim methods; compare assumptions.</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><a href="#">2605.12347</a></td>
+          <td><a href="#paper-2605-12347">Architecture Search for Variational Quantum Circuits</a></td>
+          <td><span class="badge priority-low">citation alert</span></td>
+          <td>Check references before writing.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Details</h2>
+    <article class="paper-card" id="paper-2605-12345">
+      <div class="paper-header">
+        <div>
+          <h3 class="paper-title">1. <a href="#">Measurement-Induced Structure in Quantum Many-Body Dynamics</a></h3>
+          <div class="paper-authors">A. Example, B. Researcher, C. Collaborator</div>
+        </div>
+        <span class="badge priority-high">high</span>
+      </div>
+      <div class="section-title">为什么值得读</div>
+      <p>这类报告把元数据筛选、用户画像匹配、局部精读、引用检查和研究想法拆成可追踪的步骤。Python 负责稳定缓存和格式化，agent 负责判断论文是否真正值得投入时间。</p>
+      <div class="section-title">Suggested Action</div>
+      <div class="action-box">先读 Introduction 和 main results；如果诊断成立，再下载源码检查引用和实验设置。</div>
+    </article>
+  </div>
+</body>
+</html>
