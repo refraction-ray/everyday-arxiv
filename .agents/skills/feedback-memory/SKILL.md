@@ -120,3 +120,14 @@ Do not overfit durable preferences to one paper.
 When running recommendations, use `research_interests.local.md` as the durable source of preference and consult `feedback.local.jsonl` for recent evidence that may not yet be promoted.
 
 Recent negative feedback can downrank similar papers or ideas even before it becomes a permanent profile rule, but explain this only when it affects a recommendation.
+
+## Operational Routine: Turn-End Check
+
+To ensure feedback and research preferences are recorded smoothly and actively without requiring explicit user commands:
+
+1. **Mandatory Response Checklist**: Before completing any turn, the agent must check if:
+   - The user asked two or more consecutive technical questions about a recommended paper, setup, or idea.
+   - The user expressed positive/negative sentiment, connected the work to their own research, or discussed concrete extensions/actionability.
+2. **Proactive Update Execution**: If either condition is met, the agent must immediately log the feedback (kind `paper` or `idea` with appropriate score and reason) to `user_profile/feedback.local.jsonl` and promote it to `user_profile/research_interests.local.md` (via a dated note) *in the current turn* before returning the final text.
+3. **Conversational Confirmation**: At the very end of the response, the agent must append a concise, parenthetical confirmation to keep the user informed.
+   - *Example*: `*(I have logged your interest in the MixT tensor-structured compression model and updated your active interests profile to reflect this.)*`
