@@ -74,13 +74,27 @@ Required path structure:
 - Report metadata: `data/reports/YYYY-MM-DD/run_metadata.json`.
 - Persistent idea log: `user_profile/ideas.local.jsonl`.
 
+### Downloading And Extracting Sources
+
+To programmatically download specific paper sources (source preferred, fallback to PDF) and extract/unpack them into the raw folder:
+
+```bash
+# Download and extract one or more specific paper IDs
+.conda/arxiv-daily/bin/arxiv-daily download ARXIV_ID [ARXIV_ID ...]
+```
+
+Options:
+- `--date`: Target arXiv submitted date, YYYY-MM-DD. If omitted, the CLI auto-resolves the paper's date by checking local metadata JSON caches first, and queries the arXiv API as a fallback.
+- `--delay-seconds`: Delay in seconds between sequential downloads to prevent rate limits (defaults to `3.0`).
+- `--dry-run`: Preview download actions without calling the network.
+
 ## Staged Recommendation Workflow
 
 Use this workflow for accuracy and token efficiency:
 
 1. Metadata pass: rank all cached papers using only metadata fields from the fetched JSON. The abstract text is stored under the `summary` key, not `abstract`; use `title`, `summary`, `categories`, `authors`, and `comment`. Verify all referenced IDs against the fetched JSON.
 2. Candidate selection: choose roughly 5-12 promising papers plus strong citation-check suspects. Do not fill a quota with weak papers.
-3. Source acquisition and inspection: the main agent downloads or reuses selected candidates' source/full text when needed, then applies the progressive gates locally. If subagents are explicitly requested, workers may own source acquisition for their assigned papers. To reduce repeated permission prompts, the main agent may prefetch sources for the bounded candidate set before spawning workers, but should not require this when worker-side source acquisition is more natural. If, and only if, the user explicitly requests subagents or worker-based parallel inspection, spawn one paper worker per selected candidate whenever subagents are supported by the active session.
+3. Source acquisition and inspection: the main agent downloads or reuses selected candidates' source/full text when needed using the CLI `download` command, then applies the progressive gates locally. If subagents are explicitly requested, workers may own source acquisition for their assigned papers. To reduce repeated permission prompts, the main agent may prefetch sources for the bounded candidate set before spawning workers, but should not require this when worker-side source acquisition is more natural. If, and only if, the user explicitly requests subagents or worker-based parallel inspection, spawn one paper worker per selected candidate whenever subagents are supported by the active session.
 4. Final aggregation: combine the gathered evidence into one unified ranking. The main agent decides final order and writes the user-facing reports. When explicit paper workers were used, aggregate their evidence instead of treating their output as final.
 
 Paper workers are optional, not the default. Do not spawn workers for ordinary daily-run, full-run, or quick-diagnostic requests unless the user explicitly asks for subagents, delegation, parallel agents, or workers. When workers are explicitly requested, do not spawn workers for every fetched paper; only use the bounded candidate set selected after the metadata pass.
@@ -104,7 +118,7 @@ This section applies only when the user explicitly requested subagents, delegati
 - Handle exactly one paper and return structured evidence, not a polished report.
 - Apply progressive gates: relevance first, citation check only if strongly related, close reading only if genuinely promising.
 - Stop early for weak or merely keyword-level matches and return a short low-priority assessment.
-- Own source/full-text acquisition for the assigned paper when it is needed for close reading or citation checks. Reuse an existing `SOURCE_TREE` first; otherwise download only the assigned arXiv e-print/source or PDF into `data/raw/arxiv/YYYY-MM-DD/sources/ARXIV_ID/`.
+- Own source/full-text acquisition for the assigned paper when it is needed for close reading or citation checks. Reuse an existing `SOURCE_TREE` first; otherwise download and extract the assigned arXiv source or PDF into `data/raw/arxiv/YYYY-MM-DD/sources/ARXIV_ID/` using the CLI command: `.conda/arxiv-daily/bin/arxiv-daily download ARXIV_ID`.
 - Do not install packages, use browser automation, or access unrelated network resources. If a download command needs approval, request only the minimal arXiv source/PDF fetch for the assigned paper.
 - Inspect `.tex`, `.bbl`, and `.bib` snippets with `rg`; avoid loading whole source trees.
 - For long LaTeX projects, read targeted sections only: abstract, introduction, main results or theorem statements, discussion/conclusion, figure captions, bibliography, and relevant appendix snippets.
@@ -163,6 +177,8 @@ Citation reports contain only:
 Do not mention papers that neither need an email nor already cite relevant user work.
 
 ## Citation Email Style
+
+- **Bibliographic Integrity**: To prevent hallucination of author names, publications, or journals in the email drafts, the agent MUST explicitly lookup the exact bibliographic metadata of the relevant prior paper from `user_profile/papers.local.jsonl` (using a keyword or title query) rather than relying on parametric memory.
 
 Before drafting, extract public contact emails from the paper source or text when available. Search `.tex`, `.bbl`, `.bib`, and extracted PDF text for `\email{...}`, `mailto:`, `email`, `corresponding author`, and raw email patterns. Do not search for private contact information outside the paper/source unless the user explicitly asks.
 

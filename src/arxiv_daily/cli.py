@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from xml.etree.ElementTree import ParseError
 
-from .arxiv_client import build_search_query, fetch_papers, fetch_papers_from_html
+from .arxiv_client import (
+    build_search_query,
+    fetch_papers,
+    fetch_papers_from_html,
+    download_paper_source_or_pdf,
+    fetch_url,
+    parse_feed,
+)
 from .config import load_config
 from .models import Paper
 from .scholar_client import bootstrap_scholar_profile
@@ -20,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "fetch":
         return run_fetch(args)
+    if args.command == "download":
+        return run_download(args)
     if args.command == "profile":
         return run_profile(args)
 
@@ -103,6 +113,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include patents, conference abstracts, and unknown records in papers.local.jsonl.",
     )
+
+    download = subparsers.add_parser(
+        "download",
+        help="Download paper sources (source preferred, fallback to PDF) and extract them",
+    )
+    download.add_argument(
+        "arxiv_ids",
+        nargs="+",
+        help="Specific arXiv ID(s) to download.",
+    )
+    download.add_argument(
+        "--date",
+        default=None,
+        help="Target arXiv submitted date, YYYY-MM-DD. If omitted, auto-resolves from cache/API.",
+    )
+    download.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=3.0,
+        help="Delay between sequential paper downloads in seconds to prevent rate limiting.",
+    )
+    download.add_argument("--config", default="config/default.toml", help="Path to TOML config.")
+    download.add_argument(
+        "--output-dir", default=None, help="Root output directory for raw arXiv caches."
+    )
+    download.add_argument(
+        "--dry-run", action="store_true", help="Print download plans without downloading."
+    )
+
     return parser
 
 
@@ -249,6 +288,131 @@ def _safe_filename(value: str) -> str:
         else:
             safe.append("_")
     return "".join(safe)
+
+
+def run_download(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    arxiv_config: dict[str, Any] = config["arxiv"]
+    path_config: dict[str, Any] = config["paths"]
+
+    output_root = Path(args.output_dir or path_config["raw_arxiv_dir"])
+    timeout_seconds = int(arxiv_config["request_timeout_seconds"])
+
+    success_count = 0
+    failed_count = 0
+    last_request_time = 0.0
+
+    def wait_for_rate_limit() -> None:
+        nonlocal last_request_time
+        if args.delay_seconds > 0 and last_request_time > 0:
+            elapsed = time.time() - last_request_time
+            sleep_time = args.delay_seconds - elapsed
+            if sleep_time > 0:
+                print(f"Waiting {sleep_time:.1f} seconds to avoid rate limiting...")
+                time.sleep(sleep_time)
+        last_request_time = time.time()
+
+    for arxiv_id in args.arxiv_ids:
+        # 1. Determine submission date
+        target_date = None
+        if args.date:
+            target_date = _parse_date(args.date)
+        else:
+            # Try to resolve date locally
+            target_date = _find_paper_date_locally(output_root, arxiv_id)
+            if not target_date:
+                # If not found locally, query API to determine date
+                print(
+                    f"ArXiv ID {arxiv_id} not found in local cache. Querying API to resolve date..."
+                )
+                wait_for_rate_limit()
+                target_date = _fetch_paper_date_from_api(arxiv_id, timeout_seconds)
+                if not target_date:
+                    target_date = date.today()
+                    print(
+                        f"Warning: Could not determine submission date for {arxiv_id}. "
+                        f"Defaulting to today: {target_date}"
+                    )
+
+        # The output directory for this paper's source
+        paper_dir = output_root / target_date.isoformat() / "sources" / arxiv_id
+
+        if args.dry_run:
+            print(f"[DRY-RUN] Would download source for {arxiv_id} to {paper_dir}")
+            success_count += 1
+            continue
+
+        # 2. Check if already exists to avoid redundant calls
+        if paper_dir.exists() and any(paper_dir.iterdir()):
+            print(f"Paper {arxiv_id} already has files in {paper_dir}. Skipping.")
+            success_count += 1
+            continue
+
+        # 3. Handle delay before download request
+        wait_for_rate_limit()
+
+        # 4. Download and extract
+        _, success = download_paper_source_or_pdf(
+            arxiv_id,
+            paper_dir,
+            timeout_seconds=timeout_seconds,
+        )
+        if success:
+            success_count += 1
+        else:
+            failed_count += 1
+
+    print(f"Download complete: {success_count} succeeded, {failed_count} failed.")
+    return 0 if failed_count == 0 else 1
+
+
+def _find_paper_date_locally(output_root: Path, arxiv_id: str) -> date | None:
+    # pylint: disable=broad-exception-caught
+    """
+    Tries to find the paper in existing local date-batch metadata JSON files.
+    """
+    if not output_root.exists():
+        return None
+    for date_dir in output_root.iterdir():
+        if not date_dir.is_dir():
+            continue
+        try:
+            d = date.fromisoformat(date_dir.name)
+        except ValueError:
+            continue
+
+        # Look for json files in this folder
+        for json_file in date_dir.glob("*.json"):
+            if json_file.name == "run_metadata.json":
+                continue
+            try:
+                with json_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for paper in data.get("papers", []):
+                        if paper.get("arxiv_id") == arxiv_id:
+                            return d
+            except Exception:
+                continue
+    return None
+
+
+def _fetch_paper_date_from_api(arxiv_id: str, timeout_seconds: int = 30) -> date | None:
+    # pylint: disable=broad-exception-caught
+    """
+    Queries the arXiv API for the paper to retrieve its published date.
+    """
+    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    try:
+        xml_bytes = fetch_url(url, timeout_seconds=timeout_seconds)
+        papers = parse_feed(xml_bytes)
+        if papers:
+            pub_str = papers[0].published
+            if pub_str:
+                # E.g. "2026-05-14T12:00:00Z" -> "2026-05-14"
+                return date.fromisoformat(pub_str.split("T")[0])
+    except Exception as exc:
+        print(f"Failed to fetch paper metadata from arXiv API: {exc}")
+    return None
 
 
 if __name__ == "__main__":

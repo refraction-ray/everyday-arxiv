@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import gzip
+import io
 import re
+import tarfile
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
+from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -414,3 +419,112 @@ def _extract_labeled_paragraph(result: str, label: str) -> str | None:
         if text.startswith(prefix):
             return text.removeprefix(prefix).strip() or None
     return None
+
+
+def extract_source_data(data: bytes, arxiv_id: str, output_dir: Path) -> None:
+    # pylint: disable=too-many-branches,broad-exception-caught
+    """
+    Extracts raw source package data to output_dir, transparently handling
+    various compression and container formats (.tar.gz, .zip, single .gz, PDF).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Gzip compression (starts with \x1f\x8b)
+    if data.startswith(b"\x1f\x8b"):
+        try:
+            # First attempt: parse as gzipped tarball (.tar.gz / .tgz)
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                # Safe path extraction: prevent directory traversal attacks
+                for member in tar.getmembers():
+                    member_path = Path(member.name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise ValueError(f"Dangerous path in tarball member: {member.name}")
+                tar.extractall(path=output_dir)
+                return
+        except (tarfile.ReadError, ValueError, tarfile.CompressionError):
+            # Fallback: treat as a single gzipped file (e.g. single .tex file)
+            try:
+                decompressed = gzip.decompress(data)
+                # Inspect magic bytes of the decompressed content
+                if decompressed.startswith(b"%PDF"):
+                    ext = "pdf"
+                elif decompressed.startswith(b"%!"):
+                    ext = "ps"
+                else:
+                    ext = "tex"
+                dest_file = output_dir / f"{arxiv_id}.{ext}"
+                dest_file.write_bytes(decompressed)
+                return
+            except Exception:
+                pass
+
+    # 2. Zip compression (starts with PK\x03\x04)
+    elif data.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                # Safe path extraction
+                for name in zf.namelist():
+                    member_path = Path(name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise ValueError(f"Dangerous path in zip member: {name}")
+                zf.extractall(path=output_dir)
+                return
+        except Exception:
+            pass
+
+    # 3. PDF file (starts with %PDF)
+    elif data.startswith(b"%PDF"):
+        dest_file = output_dir / f"{arxiv_id}.pdf"
+        dest_file.write_bytes(data)
+        return
+
+    # 4. Fallback: try decoding as text (raw LaTeX) or save as raw binary
+    try:
+        data.decode("utf-8")
+        dest_file = output_dir / f"{arxiv_id}.tex"
+        dest_file.write_bytes(data)
+    except UnicodeDecodeError:
+        dest_file = output_dir / f"{arxiv_id}.tar.gz"
+        dest_file.write_bytes(data)
+
+
+def download_paper_source_or_pdf(
+    arxiv_id: str,
+    output_dir: Path,
+    pdf_url: str | None = None,
+    timeout_seconds: int = 30,
+) -> tuple[str, bool]:
+    # pylint: disable=broad-exception-caught
+    """
+    Downloads paper source (preferred) or PDF fallback, and extracts it to output_dir.
+    Returns:
+        tuple (download_type, success)
+        download_type: "source", "pdf", or "failed"
+    """
+    source_url = f"https://arxiv.org/src/{arxiv_id}"
+
+    # Try downloading the source package first
+    try:
+        print(f"Downloading source from {source_url}...")
+        data = fetch_url(source_url, timeout_seconds=timeout_seconds, user_agent=HTML_USER_AGENT)
+        extract_source_data(data, arxiv_id, output_dir)
+        print(f"Successfully downloaded and extracted source for {arxiv_id} to {output_dir}")
+        return "source", True
+    except Exception as exc:
+        print(f"Failed to download source for {arxiv_id}: {exc}")
+
+    # Fallback to downloading the PDF
+    if not pdf_url:
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+
+    try:
+        print(f"Falling back to downloading PDF from {pdf_url}...")
+        data = fetch_url(pdf_url, timeout_seconds=timeout_seconds, user_agent=HTML_USER_AGENT)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = output_dir / f"{arxiv_id}.pdf"
+        dest_file.write_bytes(data)
+        print(f"Successfully downloaded fallback PDF for {arxiv_id} to {dest_file}")
+        return "pdf", True
+    except Exception as exc:
+        print(f"Failed to download fallback PDF for {arxiv_id}: {exc}")
+        return "failed", False
