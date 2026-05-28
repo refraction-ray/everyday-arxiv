@@ -1,9 +1,13 @@
 ---
 name: feedback-memory
-description: "Maintain private paper and idea feedback memory for this project: record sparse user feedback, update idea status, and promote only stable feedback patterns into the durable research profile."
+description: "Use proactively whenever the user gives feedback on a paper or idea, or engages in sustained discussion after a recommendation: record sparse feedback, update idea status, and promote stable patterns into the durable research profile."
 ---
 
 # Feedback Memory
+
+Trigger this skill proactively during conversation, not only when the user explicitly asks to save memory.
+
+When the user gives feedback or enters sustained discussion about a recommended paper, close-reading result, citation-check judgment, or research idea, you should stop and check whether this skill should be applied before ending the turn.
 
 Use this skill when the user gives feedback on a recommended arXiv paper, a close-reading result, a citation-check judgment, or a research idea, or when they ask to update preferences from prior feedback.
 
@@ -15,6 +19,8 @@ Also use this skill for implicit preference signals during an active paper or id
 - The user contrasts a paper or idea favorably against weaker generic recommendations, or asks to dig deeper into why it is useful.
 
 Treat these as lightweight feedback. Prefer recording a modest paper or idea score and a concise reason over silently ignoring the signal.
+
+In short: user feedback or meaningful follow-up discussion after a recommendation should default to checking this skill, not default to being treated as ordinary conversation.
 
 This skill is separate from `arxiv-daily`: daily screening finds candidates; feedback-memory maintains the user's evolving taste.
 
