@@ -1,11 +1,11 @@
 ---
 name: arxiv-daily
-description: "Run the daily arXiv workflow for this project: fetch a date/category batch, recommend papers against the local user profile, perform selective close reading, check missing citations, and write user-facing reports with citation-email drafts."
+description: "Run the daily arXiv workflow for this project: fetch a date/category batch, recommend papers against the local user profile, perform selective close reading, check missing citations, use cautious gated research-idea generation, and write user-facing reports with citation-email drafts."
 ---
 
 # arXiv Daily
 
-Use this skill for daily arXiv recommendations, close reading, sparse idea generation, or citation checks.
+Use this skill for daily arXiv recommendations, close reading, cautious gated idea generation, or citation checks.
 
 ## Inputs
 
@@ -63,6 +63,8 @@ Do not use adjacent-date fallback for fetch failures until both the API attempt 
 When the HTML fallback is used, treat the generated JSON cache as the source of truth for recommendation work, but record in `Run Metadata` that the metadata source was `html` and that arXiv API fallback occurred. The HTML fallback uses arXiv submitted-date filtering and then verifies each parsed result against the requested submitted date; do not recommend any paper unless it appears in the generated JSON cache.
 
 All generated paths use the arXiv source/fetch date, not the agent run date. For example, if the run date is `2026-05-21` but the latest non-empty batch is `submittedDate=2026-05-15`, all paths use `2026-05-15`.
+
+Before starting metadata ranking, source inspection, citation checks, or report generation, check whether the resolved source date and category already have a recommendation report. If `data/reports/YYYY-MM-DD/recommendations.md` or `data/reports/YYYY-MM-DD/recommendations.html` exists and `run_metadata.json` identifies the same `source_date` and category, treat that batch as already processed. For an ordinary repeated daily request, stop after verifying the requested date has no new papers and tell the user that the latest non-empty batch already has a report, with links to the existing files. Do not reread, re-rank, redownload, or overwrite the report. Only rerun the workflow when the user explicitly requests a refresh, re-audit, updated citation check, or another material change, or when the existing report is incomplete or its metadata does not match the resolved batch.
 
 Required path structure:
 
@@ -134,9 +136,20 @@ For top-ranked papers, read source, abstract page, or full text when possible. T
 
 Use shorter summaries for weaker matches or when the abstract is sufficient.
 
-Generate research ideas sparsely, only for genuinely promising papers. Good ideas combine the new paper's system, technique, or observation with a user-specific method, prior work, setup, or implementation route. Avoid generic extensions such as adding noise, changing systems, or doing larger numerics without a concrete nontrivial reason.
+Default to generating no research idea on a daily run. Idea generation is an exceptional outcome, not a quota and not a daily requirement. Only propose or persist an idea when the paper appears genuinely high-value after close reading and the idea passes a stricter value, feasibility, and novelty check.
 
-Idea records should be specific enough to retrieve and refine later. Define the proposed diagnostic, model, comparison class, observable, or first calculation instead of only naming a broad theme. When an idea relies on close-reading evidence, report notes, or a specific section of a paper, include a concise provenance pointer in `notes` or a similar field, such as the recommendation report date, local note section, source arXiv ID, paper section name, or inspected file snippet.
+Before generating an idea, do a dedicated idea-gating pass:
+
+- Read the new paper beyond metadata: inspect the source/PDF sections needed to understand the mechanism, assumptions, limitations, and evidence. Usually inspect the abstract, introduction, main result/method section, experiments or derivations, discussion/conclusion, and relevant figures/tables or appendices.
+- Read the relevant local profile material, not just the broad profile summary. Check `research_interests.local.md`, matching records in `papers.local.jsonl`, existing `ideas.local.jsonl`, and any related `data/notes/ARXIV_ID.md` notes or prior recommendation reports when they exist.
+- Compare the proposed idea against the user's related prior work and existing idea log. Do not create near-duplicates, generic continuations, or ideas that only rename an existing proposal.
+- Assess feasibility concretely: identify the first calculation, simulation, derivation, dataset, benchmark, observable, or software prototype; check that it fits the user's practical methods such as TensorCircuit/TensorCircuit-NG, tensor networks, Clifford/stabilizer numerics, VQA/QML workflows, or analytical derivation.
+- Assess novelty concretely: explain why the combination is not a routine application of the paper's own setup or a generic "apply to nearby model" extension. Prefer crossed A-plus-B combinations where the new paper supplies a mechanism or method and the user's profile supplies a distinct system, diagnostic, software route, or prior result.
+- If any of value, feasibility, or novelty is uncertain after this pass, do not create a persistent idea. Mention at most a tentative reading note in the recommendation text, clearly marked as not promoted to `ideas.local.jsonl`.
+
+Good ideas combine the new paper's system, technique, or observation with a user-specific method, prior work, setup, or implementation route. Avoid generic extensions such as adding noise, changing systems, or doing larger numerics without a concrete nontrivial reason.
+
+Idea records should be specific enough to retrieve and refine later. Define the proposed diagnostic, model, comparison class, observable, or first calculation instead of only naming a broad theme. Include evidence from the gating pass in `notes` or another concise field: cite the recommendation report date plus the inspected paper section, local note, related prior user paper, existing idea comparison, or source snippet that supports feasibility and novelty.
 
 When a high-value idea is included and persistent idea tracking exists or is requested, append a concise record to `user_profile/ideas.local.jsonl` using `user_profile/ideas.example.jsonl` as the schema:
 
@@ -147,7 +160,7 @@ When a high-value idea is included and persistent idea tracking exists or is req
 - `actionability`
 - `status`, starting as `proposed`
 
-Do not promote rejected or weak ideas into durable profile preferences. Update `research_interests.local.md` from idea feedback only when it reveals a stable preference.
+Do not promote rejected, weak, duplicate, or merely plausible ideas into `ideas.local.jsonl` or durable profile preferences. Update `research_interests.local.md` from idea feedback only when it reveals a stable preference.
 
 ## Citation Checks
 
