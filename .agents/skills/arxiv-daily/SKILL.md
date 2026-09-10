@@ -1,6 +1,6 @@
 ---
 name: arxiv-daily
-description: "Run the daily arXiv workflow for this project: fetch a date/category batch, recommend papers against the local user profile, perform selective close reading, check missing citations, use cautious gated research-idea generation, and write user-facing reports with citation-email drafts."
+description: "Run the daily arXiv workflow for this project: fetch a date/category batch, recommend papers through both user-profile relevance and a rare field-level-importance screen, perform selective close reading, check missing citations, use cautious gated research-idea generation, and write user-facing reports with citation-email drafts."
 ---
 
 # arXiv Daily
@@ -20,13 +20,51 @@ Use this skill for daily arXiv recommendations, close reading, cautious gated id
 
 - Read the local profile before ranking. Use it for active topics, lower-priority topics, methods, citation anchors, email additions, and negative preferences. Do not hard-code one user's current topics in this skill.
 - If the profile is absent or incomplete, ask targeted questions instead of inventing durable preferences.
-- Rank by concrete value to the user, not broad keyword overlap.
+- Run two independent screening tracks for every daily batch: (1) concrete value from matching the user's profile, and (2) an exceptional field-level-importance audit within the requested quantum category. The second track is an audit, not a daily recommendation quota. It normally produces zero papers and must not be used to fill, enrich, or diversify the daily list.
+- Field-level importance is deliberately breakthrough-level and extraordinarily sparse: expect zero on nearly every day and roughly at most one qualifying paper in a month as an order-of-magnitude prior, never as a target. Do not include a field-level item merely because it is elegant, rigorous, general within a subfield, experimentally impressive, or more important than average. A paper may enter through either track, and a paper that truly qualifies through both appears only once with both labels.
+- Rank profile-track papers by concrete value to the user, not broad keyword overlap. Rank field-level papers by prospective impact on the quantum-information field, independently of profile similarity; do not discard a genuinely important paper because it is outside the user's current direction.
 - Never invent papers. Load the fetched JSON, extract actual IDs, and verify every referenced paper exists in the source data before recommending, inspecting, or reporting it.
 - Recommend up to 10 papers, but do not pad weak matches or list non-recommended papers unless the user asks for diagnostics.
 - Generate both Markdown and HTML reports by default unless the user explicitly asks for only one format.
 - Markdown reports are English by default unless the user explicitly asks for another Markdown language. If the user gives the daily-scan request in Chinese, keep Markdown reports in English by default.
 - HTML reports should optimize readability for the user's request language. If the user gives the daily-scan request in Chinese, write the HTML report UI text and summaries in Chinese by default while preserving paper titles, author names, arXiv IDs, and email drafts in their natural/original language.
 - Do not spawn subagents, paper workers, or other delegated agents unless the user explicitly asks for subagents, delegation, parallel agents, or worker-based inspection in the current request. Depth, thoroughness, a full run, or daily recommendations do not count as permission to spawn subagents.
+
+## Two Recommendation Tracks
+
+The normal recommendation list combines two separately judged tracks. Keep the distinction visible in the report so that an out-of-profile paper is not mistaken for a profile match.
+
+### Profile Match
+
+Use the local profile to identify papers that are especially valuable for the user's active questions, prior work, methods, software, citation anchors, and stated preferences. Apply the ordinary relevance and staged-inspection rules below.
+
+### Field-Level Importance
+
+Scan the full fetched batch in the requested quantum category, including papers with weak or no profile match. This is a breakthrough-level audit for the rare paper that could alter the direction of multiple important quantum-information subfields or remove a core field-wide bottleneck. It is not a second source of ordinary recommendations and is a prospective judgment based on the paper's actual contribution, not a claim that impact has already been demonstrated. If no paper clears the gate, omit the field-level track from the user-facing report entirely.
+
+Treat a paper as a field-level candidate only when close reading supports a concrete case such as one or more of the following, and only after the negative tests below are passed:
+
+- A fundamental theorem, mechanism, or conceptual result that changes how a central problem is understood or resolves a significant longstanding obstacle.
+- A genuinely general method, framework, or resource that opens a capability for multiple quantum-information subfields, rather than an improvement confined to one narrow setup.
+- A decisive experimental demonstration that materially moves a meaningful feasibility boundary or establishes a new capability, with evidence strong enough to support broad attention.
+- A result that is likely to redirect standard protocols, benchmarks, architectures, or research practice across a substantial part of the field, rather than merely reporting a small state-of-the-art gain.
+- A surprising unification or observation whose consequences plausibly extend well beyond the paper's immediate model or application.
+
+The field-level gate is a conjunction, not a checklist from which one item is enough. Before including a field-level recommendation, be able to state all of the following from the paper or its source:
+
+- The precise central result and what is genuinely new.
+- Why it can affect multiple important questions or subfields, or remove a bottleneck that is genuinely shared across the field.
+- Why the result is breakthrough-level rather than merely a strong result within one subfield: identify the concrete downstream protocols, architectures, benchmarks, or research practices it could change.
+- Why the claim survives a prior-art and negative-control comparison, including the strongest nearby results that make the claim look incremental.
+- What decisive theorem, experiment, or cross-setting evidence supports the broad-impact claim, and what assumptions or limitations qualify it.
+
+Apply these hard exclusions before assigning the label. Never label the following field-level importance by themselves: a new inequality or converse for a specialized problem; an abstract capacity/bound result without a clear field-wide consequence; a formal resource theory or diagnostic confined to one construction; a method demonstrated only on one model, platform, or narrow application; a modest state-of-the-art improvement; a proof-of-concept framework whose broad utility remains hypothetical; or a paper whose importance is inferred from authors, venue, title, citation absence, or fashionable keywords. For these papers, use the ordinary profile track when relevant or omit them.
+
+Do not let a field-level label override the user's taste in an ordinary daily list. An out-of-profile paper should enter only if it clears this exceptional breakthrough gate. If the evidence is merely “important in its subfield,” “worth knowing,” or “potentially general,” it is not field-level importance.
+
+Do not use famous authors, prestigious affiliations, a dramatic title, a press-release tone, broad keywords, a large but narrow numerical gain, or the absence of citations on a same-day paper as evidence of field-level importance. If the evidence is suggestive but does not clear the gate, keep the paper on the ordinary profile track when appropriate or omit it; do not label it a breakthrough. In reports, label qualifying entries `Field-Level Importance` or the equivalent Chinese label and state that this is a high-confidence prospective assessment. Do not use `field-changing` as an unqualified fact.
+
+The total recommendation limit remains 10. Field-level entries count toward that limit only when the exceptional gate is cleared; they should displace a profile-match paper only in that case. If no paper clears the gate, do not report a field-level candidate, shortlist, honorable mention, or “field-level suspect” merely to show that the audit was performed.
 
 ## Fetching And Paths
 
@@ -95,7 +133,7 @@ Options:
 Use this workflow for accuracy and token efficiency:
 
 1. Metadata pass: rank all cached papers using only metadata fields from the fetched JSON. The abstract text is stored under the `summary` key, not `abstract`; use `title`, `summary`, `categories`, `authors`, and `comment`. Verify all referenced IDs against the fetched JSON.
-2. Candidate selection: choose roughly 5-12 promising papers plus strong citation-check suspects. Do not fill a quota with weak papers.
+2. Candidate selection: choose roughly 5-12 promising profile-track papers, strong citation-check suspects, and a small number of field-level-importance suspects flagged by the metadata pass. Do not fill either track's quota with weak papers. A field-level suspect must receive source or full-text inspection even when it is not a profile match.
 3. Source acquisition and inspection: the main agent downloads or reuses selected candidates' source/full text when needed using the CLI `download` command, then applies the progressive gates locally. If subagents are explicitly requested, workers may own source acquisition for their assigned papers. To reduce repeated permission prompts, the main agent may prefetch sources for the bounded candidate set before spawning workers, but should not require this when worker-side source acquisition is more natural. If, and only if, the user explicitly requests subagents or worker-based parallel inspection, spawn one paper worker per selected candidate whenever subagents are supported by the active session.
 4. Final aggregation: combine the gathered evidence into one unified ranking. The main agent decides final order and writes the user-facing reports. When explicit paper workers were used, aggregate their evidence instead of treating their output as final.
 
@@ -104,6 +142,7 @@ Paper workers are optional, not the default. Do not spawn workers for ordinary d
 ## Main-Agent Responsibilities
 
 - Read the profile and perform the metadata-only ranking over all cached papers.
+- Perform the field-level-importance screen over the complete fetched batch, separately from profile ranking. Flag only a small number of plausible suspects for source/full-text inspection, and do not infer field-level importance from metadata alone.
 - Select the bounded candidate paper set for source/full-text inspection.
 - Download or inspect candidate sources locally unless the user explicitly requested subagents.
 - When subagents are requested, decide explicitly whether sources are prefetched by the main agent or acquired by workers. If workers should download, say so in the worker prompt and constrain downloads to the assigned arXiv source/PDF only.
@@ -112,6 +151,7 @@ Paper workers are optional, not the default. Do not spawn workers for ordinary d
 - Continue non-overlapping work while explicitly requested workers inspect sources.
 - Verify citation-email evidence before including it in `citation_alerts.md`.
 - Follow the same staged gates locally within the main agent whenever workers are not explicitly requested, unavailable, or failed.
+- Aggregate the two recommendation tracks without letting profile similarity hide a qualifying field-level paper. Mark each final paper with its track: `Profile Match`, `Field-Level Importance`, or both. Explain the field-level judgment and its caveats separately from the user-specific connection.
 
 ## Optional Paper-Worker Subagent Responsibilities
 
@@ -127,7 +167,7 @@ This section applies only when the user explicitly requested subagents, delegati
 
 ## Close Reading And Ideas
 
-For top-ranked papers, read source, abstract page, or full text when possible. The strongest entries should usually get two to three paragraphs explaining:
+For top-ranked papers, read source, abstract page, or full text when possible. The strongest profile-match entries should usually get two to three paragraphs explaining:
 
 - What the paper actually does.
 - Why it matches the user's profile.
@@ -135,6 +175,8 @@ For top-ranked papers, read source, abstract page, or full text when possible. T
 - Whether it suggests a concrete future direction.
 
 Use shorter summaries for weaker matches or when the abstract is sufficient.
+
+Every paper recommended through the field-level-importance track requires enough source or full-text inspection to support the high-bar gate, even if it is not closely related to the user's work. Its summary should explain the concrete result, the mechanism or capability that may have broad consequences, the likely affected subfields or bottleneck, and the key limitations. Keep this assessment distinct from any user-profile connection.
 
 Default to generating no research idea on a daily run. Idea generation is an exceptional outcome, not a quota and not a daily requirement. Only propose or persist an idea when the paper appears genuinely high-value after close reading and the idea passes a stricter value, feasibility, and novelty check.
 
@@ -258,6 +300,7 @@ HTML citation report requirements:
 Recommendation reports:
 
 - Start directly with ranked recommended papers.
+- Make the recommendation track visible for every paper (`Profile Match`, `Field-Level Importance`, or both). Keep field-level papers prominent even when their user-profile relevance is weak, and explain their prospective broad impact in a dedicated sentence or paragraph.
 - Put source cache, profile files, run date, and date-convention notes under a final `Run Metadata` section.
 
 Citation reports:
@@ -294,5 +337,6 @@ After report generation, verify:
 - Each recommended paper in the HTML includes an arXiv abstract-page link.
 - HTML reports do not include bottom metadata/footer provenance blocks.
 - Recommendation report starts with recommended papers.
+- Field-level recommendations, when present, have an explicit track label and a concrete evidence-and-limitations explanation; an ordinary daily report does not imply that one must be present.
 - Citation report starts with email-worthy items.
 - Markdown metadata is at the bottom or metadata is in sidecar JSON.
