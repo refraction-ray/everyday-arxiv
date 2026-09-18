@@ -6,4 +6,5 @@ dependencies:
   - pytest
   - black
   - pylint
+  - requests
   - pip

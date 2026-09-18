@@ -7,6 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from arxiv_daily.arxiv_client import (
+    BROWSER_REQUEST_HEADERS,
+    BROWSER_USER_AGENT,
+    fetch_url,
     parse_search_html,
     extract_source_data,
     download_paper_source_or_pdf,
@@ -15,6 +18,33 @@ from arxiv_daily.cli import (
     _find_paper_date_locally,
     _fetch_paper_date_from_api,
 )
+
+
+def test_fetch_url_uses_browser_like_headers(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        content = b"ok"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, headers, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("arxiv_daily.arxiv_client.requests.get", fake_get)
+
+    assert fetch_url("https://arxiv.org", timeout_seconds=12) == b"ok"
+
+    headers = {key.lower(): value for key, value in captured["headers"].items()}
+    assert headers["user-agent"] == BROWSER_USER_AGENT
+    for key, value in BROWSER_REQUEST_HEADERS.items():
+        assert headers[key.lower()] == value
+    assert captured["url"] == "https://arxiv.org"
+    assert captured["timeout"] == 12
 
 
 def test_html_parser_excludes_revisions_from_submitted_date_batch():

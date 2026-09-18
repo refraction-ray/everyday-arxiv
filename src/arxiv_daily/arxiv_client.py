@@ -9,9 +9,11 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Iterable
+from urllib.error import URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 from xml.etree import ElementTree
+
+import requests
 
 from .models import Paper
 
@@ -22,8 +24,19 @@ ARXIV_WEB_SEARCH_URL = "https://arxiv.org/search/advanced"
 MAX_WEB_SEARCH_PAGE_SIZE = 200
 HTML_SEARCH_PAGE_SIZES = (25, 50, 100, 200)
 MIN_HTML_TIMEOUT_SECONDS = 60
-DEFAULT_USER_AGENT = "arxiv-daily/0.1"
-HTML_USER_AGENT = "Mozilla/5.0 arxiv-daily/0.1"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36"
+)
+DEFAULT_USER_AGENT = BROWSER_USER_AGENT
+HTML_USER_AGENT = BROWSER_USER_AGENT
+BROWSER_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 PHYSICS_ARCHIVES = {
     "astro-ph",
     "cond-mat",
@@ -183,9 +196,13 @@ def fetch_papers_from_html(
 
 
 def fetch_url(url: str, *, timeout_seconds: int, user_agent: str = DEFAULT_USER_AGENT) -> bytes:
-    request = Request(url, headers={"User-Agent": user_agent})
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+    headers = {"User-Agent": user_agent, **BROWSER_REQUEST_HEADERS}
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout_seconds)
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as exc:
+        raise URLError(str(exc)) from exc
 
 
 def parse_search_html(html: str, *, target_date: date) -> list[Paper]:
