@@ -99,7 +99,9 @@ def build_query_url(
     return f"{base_url}?{urlencode(params)}"
 
 
-def build_html_search_url(*, category: str, target_date: date, max_results: int) -> str:
+def build_html_search_url(
+    *, category: str, target_date: date, max_results: int, start: int = 0
+) -> str:
     page_size = _html_page_size(max_results)
     params = {
         "advanced": "1",
@@ -115,6 +117,7 @@ def build_html_search_url(*, category: str, target_date: date, max_results: int)
         "date-date_type": "submitted_date",
         "abstracts": "show",
         "size": str(page_size),
+        "start": str(start),
         "order": "-submitted_date",
     }
     params.update(_classification_params(category))
@@ -169,21 +172,54 @@ def fetch_papers_from_html(
     urls: list[str] = []
 
     for category in categories:
-        url = build_html_search_url(
-            category=category,
-            target_date=target_date,
-            max_results=max_results,
-        )
-        urls.append(url)
-        html = fetch_url(
-            url,
-            timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS),
-            user_agent=HTML_USER_AGENT,
-        ).decode("utf-8", errors="replace")
-        for paper in parse_search_html(html, target_date=target_date):
-            papers_by_id.setdefault(paper.arxiv_id, paper)
-            if len(papers_by_id) >= max_results:
+        start = 0
+        seen_page_ids: set[str] = set()
+        while len(papers_by_id) < max_results:
+            url = build_html_search_url(
+                category=category,
+                target_date=target_date,
+                max_results=max_results,
+                start=start,
+            )
+            urls.append(url)
+            html = fetch_url(
+                url,
+                timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS),
+                user_agent=HTML_USER_AGENT,
+            ).decode("utf-8", errors="replace")
+            result_blocks = _search_result_blocks(html)
+            if not result_blocks:
                 break
+
+            page_ids = {
+                arxiv_id
+                for result in result_blocks
+                if (arxiv_id := _search_result_arxiv_id(result)) is not None
+            }
+            if not page_ids:
+                raise RuntimeError(
+                    "arXiv HTML search returned result rows without parseable "
+                    "arXiv IDs; refusing incomplete metadata."
+                )
+            if start > 0 and page_ids and page_ids.issubset(seen_page_ids):
+                raise RuntimeError(
+                    "arXiv HTML pagination returned a repeated page without new "
+                    f"results at start={start}; refusing incomplete metadata."
+                )
+            seen_page_ids.update(page_ids)
+
+            for result in result_blocks:
+                paper = _parse_search_result(result, target_date)
+                if paper is not None:
+                    papers_by_id.setdefault(paper.arxiv_id, paper)
+                    if len(papers_by_id) >= max_results:
+                        break
+
+            # Do not assume that arXiv honored the requested `size`. The server
+            # has historically returned a smaller page, so advance by the
+            # number of rows actually returned rather than by the requested
+            # page size. Continue until an empty page confirms exhaustion.
+            start += len(result_blocks)
         if len(papers_by_id) >= max_results:
             break
 
@@ -206,7 +242,7 @@ def fetch_url(url: str, *, timeout_seconds: int, user_agent: str = DEFAULT_USER_
 
 
 def parse_search_html(html: str, *, target_date: date) -> list[Paper]:
-    results = re.findall(r'<li class="arxiv-result">(.*?)</li>', html, flags=re.S)
+    results = _search_result_blocks(html)
     papers: list[Paper] = []
 
     for result in results:
@@ -215,6 +251,17 @@ def parse_search_html(html: str, *, target_date: date) -> list[Paper]:
             papers.append(paper)
 
     return papers
+
+
+def _search_result_blocks(html: str) -> list[str]:
+    return re.findall(r'<li class="arxiv-result">(.*?)</li>', html, flags=re.S)
+
+
+def _search_result_arxiv_id(result: str) -> str | None:
+    arxiv_id = _first_match(r'href="https://arxiv\.org/abs/([^"]+)"', result)
+    if arxiv_id is None:
+        arxiv_id = _first_match(r'href="/abs/([^"]+)"', result)
+    return re.sub(r"v\d+$", "", arxiv_id) if arxiv_id is not None else None
 
 
 def parse_feed(xml_bytes: bytes) -> list[Paper]:

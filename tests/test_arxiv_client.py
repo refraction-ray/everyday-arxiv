@@ -3,12 +3,16 @@ import io
 import tarfile
 import zipfile
 from datetime import date
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from arxiv_daily.arxiv_client import (
     BROWSER_REQUEST_HEADERS,
     BROWSER_USER_AGENT,
+    fetch_papers_from_html,
     fetch_url,
     parse_search_html,
     extract_source_data,
@@ -97,6 +101,76 @@ def test_html_parser_keeps_first_submissions_from_submitted_date_batch():
     assert papers[0].summary == "First submission."
     assert papers[0].published.startswith("2026-05-14")
     assert papers[0].updated.startswith("2026-05-14")
+
+
+def _html_search_result(arxiv_id: str, title: str) -> str:
+    return f"""
+    <li class="arxiv-result">
+      <p class="list-title is-inline-block">
+        <a href="https://arxiv.org/abs/{arxiv_id}v1">arXiv:{arxiv_id}v1</a>
+      </p>
+      <p class="title is-5 mathjax">{title}</p>
+      <p class="authors"><a>Author One</a></p>
+      <div class="tags"><span class="tag is-small">quant-ph</span></div>
+      <p class="abstract mathjax">Abstract: {title} abstract.</p>
+      <p class="is-size-7">
+        <span class="has-text-weight-semibold">Submitted</span> 21 September, 2026;
+        <span class="has-text-weight-semibold">v1</span> submitted 21 September, 2026;
+      </p>
+    </li>
+    """
+
+
+def test_html_fetch_paginates_using_rows_actually_returned(monkeypatch):
+    pages = {
+        0: _html_search_result("2609.25201", "First page one")
+        + _html_search_result("2609.25202", "First page two"),
+        2: _html_search_result("2609.25203", "Second page one"),
+        3: "<ol></ol>",
+    }
+    requested_starts = []
+
+    def fake_fetch(url, *, timeout_seconds, user_agent):
+        del timeout_seconds, user_agent
+        start = int(parse_qs(urlparse(url).query)["start"][0])
+        requested_starts.append(start)
+        return pages[start].encode("utf-8")
+
+    monkeypatch.setattr("arxiv_daily.arxiv_client.fetch_url", fake_fetch)
+
+    _, papers = fetch_papers_from_html(
+        categories=["quant-ph"],
+        target_date=date(2026, 9, 21),
+        max_results=200,
+        timeout_seconds=1,
+    )
+
+    assert requested_starts == [0, 2, 3]
+    assert [paper.arxiv_id for paper in papers] == [
+        "2609.25203",
+        "2609.25202",
+        "2609.25201",
+    ]
+
+
+def test_html_fetch_rejects_repeated_page(monkeypatch):
+    page = _html_search_result("2609.25201", "Repeated page")
+
+    def fake_fetch(url, *, timeout_seconds, user_agent):
+        del timeout_seconds, user_agent
+        start = int(parse_qs(urlparse(url).query)["start"][0])
+        assert start in {0, 1}
+        return page.encode("utf-8")
+
+    monkeypatch.setattr("arxiv_daily.arxiv_client.fetch_url", fake_fetch)
+
+    with pytest.raises(RuntimeError, match="repeated page"):
+        fetch_papers_from_html(
+            categories=["quant-ph"],
+            target_date=date(2026, 9, 21),
+            max_results=200,
+            timeout_seconds=1,
+        )
 
 
 def test_extract_source_data_tar_gz(tmp_path):
