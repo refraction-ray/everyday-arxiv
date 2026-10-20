@@ -78,5 +78,7 @@ If package metadata is needed for console scripts or imports without `PYTHONPATH
 
 - Default arXiv category: `quant-ph`.
 - Default date: local current date used by the CLI.
-- arXiv date filtering uses `submittedDate` ranges in `YYYYMMDD0000` to `YYYYMMDD2359`.
+- Ordinary daily runs use `--source list`, which reads `arxiv.org/list/<category>/new` and selects by **announcement date**. This is the batch a reader sees on arXiv that day, and it is the only way to include weekend and moderator-held submissions, which are announced together with the next batch.
+- The API and HTML-search sources filter by `submittedDate` ranges in `YYYYMMDD0000` to `YYYYMMDD2359`. That is a UTC submission-date slice, not an announcement batch: it misses papers submitted on earlier days but announced today, and it includes same-day submissions announced only tomorrow. `submittedDate=<today>` returns 0 papers until the 20:00 ET announcement, which is expected and not a fetch failure.
 - When the HTML fallback is used, only papers whose first version (`v1 submitted`) matches the target date should be included; later revisions on that date are not part of the daily first-submission batch.
+- Never infer a paper count from `len(json.load(...))` on a metadata cache: the top-level JSON is an object with 8 keys. Read its `count` field or `len(payload["papers"])`.

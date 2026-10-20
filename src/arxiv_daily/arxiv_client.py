@@ -9,9 +9,10 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Iterable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from xml.etree import ElementTree
+from xml.etree.ElementTree import ParseError
 
 import requests
 
@@ -21,6 +22,12 @@ ATOM_NS = "http://www.w3.org/2005/Atom"
 ARXIV_NS = "http://arxiv.org/schemas/atom"
 NS = {"atom": ATOM_NS, "arxiv": ARXIV_NS}
 ARXIV_WEB_SEARCH_URL = "https://arxiv.org/search/advanced"
+ARXIV_LISTING_URL_TEMPLATE = "https://arxiv.org/list/{category}/new"
+LISTING_ANNOUNCEMENT_PATTERN = (
+    r"Showing new listings for\s+[A-Za-z]+,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})"
+)
+LISTING_SECTION_COUNTS_PATTERN = r"New submissions \(showing (\d+) of (\d+) entries\)"
+DEFAULT_LISTING_PAGE_SIZE = 2000
 MAX_WEB_SEARCH_PAGE_SIZE = 200
 HTML_SEARCH_PAGE_SIZES = (25, 50, 100, 200)
 MIN_HTML_TIMEOUT_SECONDS = 60
@@ -229,6 +236,261 @@ def fetch_papers_from_html(
         reverse=True,
     )
     return " | ".join(urls), papers[:max_results]
+
+
+def build_listing_url(
+    *, category: str, start: int = 0, show: int = DEFAULT_LISTING_PAGE_SIZE
+) -> str:
+    base = ARXIV_LISTING_URL_TEMPLATE.format(category=category)
+    return f"{base}?{urlencode({'skip': str(start), 'show': str(show)})}"
+
+
+def parse_listing_announcement_date(html: str) -> date | None:
+    match = re.search(LISTING_ANNOUNCEMENT_PATTERN, html)
+    if match is None:
+        return None
+    day, month_name, year = match.groups()
+    try:
+        return datetime.strptime(f"{day} {month_name} {year}", "%d %B %Y").date()
+    except ValueError:
+        return None
+
+
+def parse_listing_html(html: str, *, announcement_date: date) -> list[Paper]:
+    block = _listing_new_submission_block(html)
+    if block is None:
+        return []
+
+    papers: list[Paper] = []
+    for dt_block, dd_block in _listing_entry_blocks(block):
+        paper = _parse_listing_entry(dt_block, dd_block, announcement_date=announcement_date)
+        if paper is not None:
+            papers.append(paper)
+    return papers
+
+
+def _listing_new_submission_block(html: str) -> str | None:
+    for part in re.split(r"<h3>", html):
+        if part.startswith("New submissions"):
+            _, _, rest = part.partition("</h3>")
+            return rest or part
+    return None
+
+
+def _listing_entry_blocks(block: str) -> list[tuple[str, str]]:
+    return re.findall(r"<dt>(.*?)</dt>\s*<dd>(.*?)</dd>", block, flags=re.S)
+
+
+def _listing_section_counts(html: str) -> tuple[int | None, int | None]:
+    match = re.search(LISTING_SECTION_COUNTS_PATTERN, html)
+    if match is None:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_listing_entry(dt_block: str, dd_block: str, *, announcement_date: date) -> Paper | None:
+    arxiv_id = _first_match(r'href\s*=\s*"/abs/([^"]+)"', dt_block)
+    if arxiv_id is None:
+        return None
+    bare_id = re.sub(r"v\d+$", "", arxiv_id)
+
+    title = _html_text(
+        _first_match(
+            r"list-title mathjax'>\s*<span class='descriptor'>Title:</span>\s*(.*?)\s*</div>",
+            dd_block,
+        )
+    )
+    summary = _html_text(_first_match(r"<p class='mathjax'>\s*(.*?)\s*</p>", dd_block))
+    authors_block = _first_match(r"<div class='list-authors'>(.*?)</div>", dd_block) or ""
+    authors = [
+        _html_text(author)
+        for author in re.findall(r"<a\b[^>]*>(.*?)</a>", authors_block, flags=re.S)
+    ]
+    authors = [author for author in authors if author]
+
+    subjects_block = _first_match(r"<div class='list-subjects'>(.*?)</div>", dd_block) or ""
+    categories = re.findall(r"\(([A-Za-z][A-Za-z\-]*(?:\.[A-Za-z\-]+)?)\)", subjects_block)
+    primary = _first_match(r'<span class="primary-subject">.*?\(([^)]+)\)</span>', subjects_block)
+    comment = _html_text(
+        _first_match(
+            r"list-comments mathjax'>\s*<span class='descriptor'>Comments:</span>\s*(.*?)\s*</div>",
+            dd_block,
+        )
+    )
+
+    # The new-listing page carries no per-paper submission timestamp. The
+    # announcement date is the best available placeholder and is replaced by
+    # fetch_papers_by_ids when the arXiv API is reachable.
+    timestamp = _date_to_arxiv_timestamp(announcement_date)
+    return Paper(
+        arxiv_id=bare_id,
+        title=title,
+        authors=authors,
+        summary=summary,
+        categories=categories,
+        primary_category=primary or (categories[0] if categories else None),
+        published=timestamp,
+        updated=timestamp,
+        abs_url=f"https://arxiv.org/abs/{bare_id}",
+        pdf_url=f"https://arxiv.org/pdf/{bare_id}",
+        comment=comment or None,
+    )
+
+
+def fetch_papers_from_listing(
+    *,
+    base_url: str | None,
+    categories: list[str],
+    target_date: date,
+    max_results: int,
+    timeout_seconds: int,
+) -> tuple[str, list[Paper]]:
+    """Fetch the arXiv announcement batch for ``target_date``.
+
+    Unlike the API and advanced-search paths, which select by submission date,
+    this reads ``arxiv.org/list/<category>/new``, i.e. the batch that was
+    announced on ``target_date``. Weekend and moderator-held submissions are
+    announced together with the following batch, so this is the only way to
+    reproduce what a reader sees on the listing page that day.
+    """
+    papers_by_id: dict[str, Paper] = {}
+    urls: list[str] = []
+
+    for category in categories:
+        _collect_listing_category(
+            category=category,
+            target_date=target_date,
+            papers_by_id=papers_by_id,
+            urls=urls,
+            max_results=max_results,
+            timeout_seconds=timeout_seconds,
+        )
+        if len(papers_by_id) >= max_results:
+            break
+
+    papers, enrichment_error = _enrich_listing_papers(
+        base_url=base_url,
+        papers=list(papers_by_id.values()),
+        timeout_seconds=timeout_seconds,
+    )
+    papers.sort(key=lambda paper: (paper.updated, paper.arxiv_id), reverse=True)
+
+    query = " | ".join(urls)
+    if enrichment_error is not None:
+        query = f"{query} [submission timestamps not enriched by the arXiv API: {enrichment_error}]"
+    return query, papers[:max_results]
+
+
+def _collect_listing_category(
+    *,
+    category: str,
+    target_date: date,
+    papers_by_id: dict[str, Paper],
+    urls: list[str],
+    max_results: int,
+    timeout_seconds: int,
+) -> None:
+    start = 0
+    seen_page_ids: set[str] = set()
+    while len(papers_by_id) < max_results:
+        url = build_listing_url(category=category, start=start)
+        urls.append(url)
+        html = fetch_url(
+            url,
+            timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS),
+            user_agent=HTML_USER_AGENT,
+        ).decode("utf-8", errors="replace")
+
+        announcement_date = _require_listing_announcement_date(html, target_date)
+        entries = _require_listing_entries(html)
+        if not entries:
+            return
+
+        page_ids = _store_listing_entries(entries, announcement_date, papers_by_id, max_results)
+        if start > 0 and page_ids and page_ids.issubset(seen_page_ids):
+            raise RuntimeError(
+                "arXiv new-listing pagination returned a repeated page without new "
+                f"results at start={start}; refusing incomplete metadata."
+            )
+        seen_page_ids.update(page_ids)
+
+        _, total = _listing_section_counts(html)
+        start += len(entries)
+        if total is None or start >= total:
+            return
+
+
+def _require_listing_announcement_date(html: str, target_date: date) -> date:
+    announcement_date = parse_listing_announcement_date(html)
+    if announcement_date is None:
+        raise RuntimeError(
+            "Could not read the announcement date from the arXiv new-listing page; "
+            "refusing to emit metadata of ambiguous date."
+        )
+    if announcement_date != target_date:
+        raise RuntimeError(
+            "arxiv.org currently lists new submissions for "
+            f"{announcement_date.isoformat()}, not the requested "
+            f"{target_date.isoformat()}. The new-listing page only exposes the most "
+            "recent announcement batch."
+        )
+    return announcement_date
+
+
+def _require_listing_entries(html: str) -> list[tuple[str, str]]:
+    block = _listing_new_submission_block(html)
+    if block is None:
+        raise RuntimeError(
+            "The arXiv new-listing page did not contain a 'New submissions' section; "
+            "the page structure may have changed."
+        )
+    return _listing_entry_blocks(block)
+
+
+def _store_listing_entries(
+    entries: list[tuple[str, str]],
+    announcement_date: date,
+    papers_by_id: dict[str, Paper],
+    max_results: int,
+) -> set[str]:
+    page_ids: set[str] = set()
+    for dt_block, dd_block in entries:
+        paper = _parse_listing_entry(dt_block, dd_block, announcement_date=announcement_date)
+        if paper is None:
+            continue
+        page_ids.add(paper.arxiv_id)
+        papers_by_id.setdefault(paper.arxiv_id, paper)
+        if len(papers_by_id) >= max_results:
+            break
+    return page_ids
+
+
+def _enrich_listing_papers(
+    *, base_url: str | None, papers: list[Paper], timeout_seconds: int
+) -> tuple[list[Paper], str | None]:
+    if not base_url or not papers:
+        return papers, None
+    try:
+        enriched = fetch_papers_by_ids(
+            base_url=base_url,
+            ids=[paper.arxiv_id for paper in papers],
+            timeout_seconds=timeout_seconds,
+        )
+    except (HTTPError, URLError, OSError, ParseError, ValueError) as exc:
+        return papers, str(exc)
+    return [enriched.get(paper.arxiv_id, paper) for paper in papers], None
+
+
+def fetch_papers_by_ids(
+    *, base_url: str, ids: Iterable[str], timeout_seconds: int
+) -> dict[str, Paper]:
+    clean_ids = [re.sub(r"v\d+$", "", item) for item in ids if item]
+    if not clean_ids:
+        return {}
+
+    params = {"id_list": ",".join(clean_ids), "max_results": str(len(clean_ids))}
+    xml_bytes = fetch_url(f"{base_url}?{urlencode(params)}", timeout_seconds=timeout_seconds)
+    return {re.sub(r"v\d+$", "", paper.arxiv_id): paper for paper in parse_feed(xml_bytes)}
 
 
 def fetch_url(url: str, *, timeout_seconds: int, user_agent: str = DEFAULT_USER_AGENT) -> bytes:

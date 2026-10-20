@@ -71,10 +71,22 @@ The total recommendation limit remains 10. Field-level entries count toward that
 Fetch metadata with the project CLI. The normal command is:
 
 ```bash
+.conda/arxiv-daily/bin/arxiv-daily fetch --date YYYY-MM-DD --category quant-ph --source list
+```
+
+`--source list` is the default for ordinary daily runs. It reads `arxiv.org/list/<category>/new`, i.e. the **announcement batch** that arXiv published on the requested date, which is what a reader actually sees on the new-listing page that day. This matters because arXiv announces in batches gated by Eastern-time cutoffs, while `submittedDate` is a UTC submission timestamp:
+
+- Weekend and moderator-held submissions are announced together with the following batch, so a Monday announcement batch routinely contains papers submitted on Friday, Saturday, and Sunday.
+- A single-date `submittedDate` window therefore misses 30-50% of a Monday batch, and it also includes same-day submissions that will only be announced the next day.
+- `submittedDate=<today>` returns 0 papers until the batch is announced at 20:00 ET; that is expected, not a fetch failure.
+
+Use `--source auto` or `--source api` only when you deliberately want the submitted-date slice:
+
+```bash
 .conda/arxiv-daily/bin/arxiv-daily fetch --date YYYY-MM-DD --category quant-ph --source auto
 ```
 
-`--source auto` is required for ordinary daily runs: it tries the arXiv API first and, if that fails due to network instability, HTTP errors, rate limiting, or XML/parser errors, falls back to scraping the arXiv web search result page directly.
+`--source auto` tries the arXiv API first and, if that fails due to network instability, HTTP errors, rate limiting, or XML/parser errors, falls back to scraping the arXiv web search result page directly.
 
 Use these explicit variants when diagnosing fetch behavior:
 
@@ -88,19 +100,21 @@ Use these explicit variants when diagnosing fetch behavior:
 
 `--source api` means arXiv API only. `--source html` means skip the API and read arxiv.org HTML search results directly. Use the HTML command as the manual fallback when the API is flaky but the arXiv website is reachable.
 
-For a non-network preview of the output path and API query:
+For a non-network preview of the output path and query:
 
 ```bash
-.conda/arxiv-daily/bin/arxiv-daily fetch --date YYYY-MM-DD --category quant-ph --source auto --dry-run
+.conda/arxiv-daily/bin/arxiv-daily fetch --date YYYY-MM-DD --category quant-ph --source list --dry-run
 ```
 
-If the requested local date is fetched successfully and returns zero papers, check adjacent submitted dates and use the latest non-empty batch. Always state the date convention explicitly.
+`--source list` refuses to write a cache when the live listing page is for a different announcement date than `--date`, because that page only ever exposes the most recent batch. If the user asks for an older announcement batch, say so instead of silently substituting a different batch.
 
-Do not use adjacent-date fallback for fetch failures until both the API attempt and the arxiv.org HTML fallback fail. If `--source auto` or the explicit `--source html` fallback still fails because of rate limiting, network errors, HTTP errors, parser errors, page-structure changes, or other non-zero command failures, report the failure directly to the user, including the requested date/category and the concrete error when available. Do not substitute a cached or adjacent-date batch unless the user explicitly asks for that fallback after seeing the failure.
+If a `--source list` run returns zero papers, the requested date is not the current announcement date (arXiv announces at 20:00 ET and skips weekends/holidays). Report that rather than falling back silently. If a `--source api` or `--source html` run returns zero papers, that only means no first version was submitted on that UTC date; it is **not** evidence that there was no arXiv batch that day.
 
-When the HTML fallback is used, treat the generated JSON cache as the source of truth for recommendation work, but record in `Run Metadata` that the metadata source was `html` and that arXiv API fallback occurred. The HTML fallback uses arXiv submitted-date filtering and then verifies each parsed result against the requested submitted date; do not recommend any paper unless it appears in the generated JSON cache.
+Do not use adjacent-date fallback for fetch failures until both the API attempt and the arxiv.org HTML fallback fail. If `--source list`, `--source auto`, or the explicit `--source html` fallback fails because of rate limiting, network errors, HTTP errors, parser errors, page-structure changes, or other non-zero command failures, report the failure directly to the user, including the requested date/category and the concrete error when available. Do not substitute a cached or adjacent-date batch unless the user explicitly asks for that fallback after seeing the failure.
 
-All generated paths use the arXiv source/fetch date, not the agent run date. For example, if the run date is `2026-05-21` but the latest non-empty batch is `submittedDate=2026-05-15`, all paths use `2026-05-15`.
+When a source fallback is used, treat the generated JSON cache as the source of truth for recommendation work, but record the metadata source in `Run Metadata` (and, for `html`, that arXiv API fallback occurred). The `html` source applies arXiv submitted-date filtering and then verifies each parsed result against the requested submitted date; `list` applies announcement-batch semantics and enriches the announcement-date placeholders with real submission timestamps through an arXiv API `id_list` query when the API is reachable. Do not recommend any paper unless it appears in the generated JSON cache.
+
+All generated paths use the resolved source date, not the agent run date. With `--source list` that date is the announcement date, which is what the user means by "today's arXiv". With `--source api`/`html` it is the UTC submission date. State which convention was used. For example, if the run date is `2026-05-21` but the latest non-empty API batch is `submittedDate=2026-05-15`, all paths use `2026-05-15`.
 
 Before starting metadata ranking, source inspection, citation checks, or report generation, check whether the resolved source date and category already have a recommendation report. If `data/reports/YYYY-MM-DD/recommendations.md` or `data/reports/YYYY-MM-DD/recommendations.html` exists and `run_metadata.json` identifies the same `source_date` and category, treat that batch as already processed. For an ordinary repeated daily request, stop after verifying the requested date has no new papers and tell the user that the latest non-empty batch already has a report, with links to the existing files. Do not reread, re-rank, redownload, or overwrite the report. Only rerun the workflow when the user explicitly requests a refresh, re-audit, updated citation check, or another material change, or when the existing report is incomplete or its metadata does not match the resolved batch.
 
@@ -332,6 +346,7 @@ After code changes, run:
 After report generation, verify:
 
 - Reports are under the arXiv source-date folder.
+- Batch completeness: read `count` from the metadata JSON (never `len()` of the top-level object) and, for `--source list`, compare it with the `(showing N of N entries)` figure on the listing page. A one-day `submittedDate` count that is well below the listing count means the wrong source was used.
 - `recommendations.html` exists, is titled `Everyday arXiv 推荐`, and its top-list links jump to matching paper-card IDs.
 - HTML visible arXiv IDs and same-page anchors use bare IDs without `vN` suffixes.
 - Each recommended paper in the HTML includes an arXiv abstract-page link.

@@ -10,9 +10,11 @@ from urllib.error import HTTPError, URLError
 from xml.etree.ElementTree import ParseError
 
 from .arxiv_client import (
+    build_listing_url,
     build_search_query,
     fetch_papers,
     fetch_papers_from_html,
+    fetch_papers_from_listing,
     download_paper_source_or_pdf,
     fetch_url,
     parse_feed,
@@ -62,9 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch.add_argument(
         "--source",
-        choices=["auto", "api", "html"],
+        choices=["auto", "api", "html", "list"],
         default="auto",
-        help="Metadata source. auto uses the arXiv API first, then arxiv.org HTML search.",
+        help=(
+            "Metadata source. auto uses the arXiv API first, then arxiv.org HTML search; "
+            "api and html select by submission date; list reads arxiv.org/list/<category>/new, "
+            "i.e. the announcement batch for the requested date."
+        ),
     )
 
     profile = subparsers.add_parser("profile", help="Initialize or update local user profile files")
@@ -156,7 +162,10 @@ def run_fetch(args: argparse.Namespace) -> int:
     page_size = args.page_size or int(arxiv_config["page_size"])
     output_root = Path(args.output_dir or path_config["raw_arxiv_dir"])
     output_path = _output_path(output_root, target_date, categories)
-    search_query = build_search_query(categories, target_date)
+    if args.source == "list":
+        search_query = " | ".join(build_listing_url(category=category) for category in categories)
+    else:
+        search_query = build_search_query(categories, target_date)
 
     if args.dry_run:
         preview_url = {
@@ -218,6 +227,16 @@ def _fetch_with_source(
             timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
         )
         return query, papers, "html", None
+
+    if source == "list":
+        query, papers = fetch_papers_from_listing(
+            base_url=str(arxiv_config["base_url"]),
+            categories=categories,
+            target_date=target_date,
+            max_results=max_results,
+            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
+        )
+        return query, papers, "list", None
 
     try:
         query, papers = fetch_papers(
