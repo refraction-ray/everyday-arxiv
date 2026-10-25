@@ -5,14 +5,11 @@ import io
 import re
 import tarfile
 import zipfile
-from datetime import date, datetime, timedelta, timezone
-from html import unescape
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from xml.etree import ElementTree
-from xml.etree.ElementTree import ParseError
 
 import requests
 
@@ -21,509 +18,53 @@ from .models import Paper
 ATOM_NS = "http://www.w3.org/2005/Atom"
 ARXIV_NS = "http://arxiv.org/schemas/atom"
 NS = {"atom": ATOM_NS, "arxiv": ARXIV_NS}
-ARXIV_WEB_SEARCH_URL = "https://arxiv.org/search/advanced"
-ARXIV_LISTING_URL_TEMPLATE = "https://arxiv.org/list/{category}/new"
-LISTING_ANNOUNCEMENT_PATTERN = (
-    r"Showing new listings for\s+[A-Za-z]+,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})"
-)
-LISTING_SECTION_COUNTS_PATTERN = r"New submissions \(showing (\d+) of (\d+) entries\)"
-DEFAULT_LISTING_PAGE_SIZE = 2000
-MAX_WEB_SEARCH_PAGE_SIZE = 200
-HTML_SEARCH_PAGE_SIZES = (25, 50, 100, 200)
 MIN_HTML_TIMEOUT_SECONDS = 60
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/140.0.0.0 Safari/537.36"
 )
-DEFAULT_USER_AGENT = BROWSER_USER_AGENT
-HTML_USER_AGENT = BROWSER_USER_AGENT
 BROWSER_REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
-PHYSICS_ARCHIVES = {
-    "astro-ph",
-    "cond-mat",
-    "gr-qc",
-    "hep-ex",
-    "hep-lat",
-    "hep-ph",
-    "hep-th",
-    "math-ph",
-    "nlin",
-    "nucl-ex",
-    "nucl-th",
-    "physics",
-    "quant-ph",
-}
-CATEGORY_PREFIX_CLASSIFICATION = {
-    "cs.": "classification-computer_science",
-    "econ.": "classification-economics",
-    "eess.": "classification-eess",
-    "math.": "classification-mathematics",
-    "q-bio.": "classification-q_biology",
-    "q-fin.": "classification-q_finance",
-    "stat.": "classification-statistics",
-}
 
 
-def build_search_query(categories: Iterable[str], target_date: date | None = None) -> str:
-    clean_categories = [item.strip() for item in categories if item.strip()]
-    if not clean_categories:
-        raise ValueError("At least one arXiv category is required.")
-
-    category_query = " OR ".join(f"cat:{category}" for category in clean_categories)
-    if len(clean_categories) > 1:
-        category_query = f"({category_query})"
-
-    if target_date is None:
-        return category_query
-
-    date_token = target_date.strftime("%Y%m%d")
-    date_query = f"submittedDate:[{date_token}0000 TO {date_token}2359]"
-    return f"{category_query} AND {date_query}"
-
-
-def build_query_url(
-    *,
-    base_url: str,
-    search_query: str,
-    start: int,
-    max_results: int,
-    sort_by: str,
-    sort_order: str,
-) -> str:
-    params = {
-        "search_query": search_query,
-        "start": str(start),
-        "max_results": str(max_results),
-        "sortBy": sort_by,
-        "sortOrder": sort_order,
-    }
-    return f"{base_url}?{urlencode(params)}"
-
-
-def build_html_search_url(
-    *, category: str, target_date: date, max_results: int, start: int = 0
-) -> str:
-    page_size = _html_page_size(max_results)
-    params = {
-        "advanced": "1",
-        "terms-0-operator": "AND",
-        "terms-0-term": category,
-        "terms-0-field": "all",
-        "classification-include_cross_list": "include",
-        "date-filter_by": "date_range",
-        "date-from_date": target_date.isoformat(),
-        # arXiv advanced search rejects identical start/end dates. Fetch a two-day
-        # window and filter exact submitted dates after parsing each result.
-        "date-to_date": (target_date + timedelta(days=1)).isoformat(),
-        "date-date_type": "submitted_date",
-        "abstracts": "show",
-        "size": str(page_size),
-        "start": str(start),
-        "order": "-submitted_date",
-    }
-    params.update(_classification_params(category))
-    return f"{ARXIV_WEB_SEARCH_URL}?{urlencode(params)}"
-
-
-def fetch_papers(
-    *,
-    base_url: str,
-    categories: list[str],
-    target_date: date | None,
-    max_results: int,
-    page_size: int,
-    sort_by: str,
-    sort_order: str,
-    timeout_seconds: int,
-) -> tuple[str, list[Paper]]:
-    search_query = build_search_query(categories, target_date)
-    papers: list[Paper] = []
-    start = 0
-
-    while len(papers) < max_results:
-        current_page_size = min(page_size, max_results - len(papers))
-        url = build_query_url(
-            base_url=base_url,
-            search_query=search_query,
-            start=start,
-            max_results=current_page_size,
-            sort_by=sort_by,
-            sort_order=sort_order,
-        )
-        xml_bytes = fetch_url(url, timeout_seconds=timeout_seconds)
-        page = parse_feed(xml_bytes)
-        if not page:
-            break
-        papers.extend(page)
-        if len(page) < current_page_size:
-            break
-        start += current_page_size
-
-    return search_query, papers[:max_results]
-
-
-def fetch_papers_from_html(
-    *,
-    categories: list[str],
-    target_date: date,
-    max_results: int,
-    timeout_seconds: int,
-) -> tuple[str, list[Paper]]:
-    papers_by_id: dict[str, Paper] = {}
-    urls: list[str] = []
-
-    for category in categories:
-        start = 0
-        seen_page_ids: set[str] = set()
-        while len(papers_by_id) < max_results:
-            url = build_html_search_url(
-                category=category,
-                target_date=target_date,
-                max_results=max_results,
-                start=start,
-            )
-            urls.append(url)
-            html = fetch_url(
-                url,
-                timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS),
-                user_agent=HTML_USER_AGENT,
-            ).decode("utf-8", errors="replace")
-            result_blocks = _search_result_blocks(html)
-            if not result_blocks:
-                break
-
-            page_ids = {
-                arxiv_id
-                for result in result_blocks
-                if (arxiv_id := _search_result_arxiv_id(result)) is not None
-            }
-            if not page_ids:
-                raise RuntimeError(
-                    "arXiv HTML search returned result rows without parseable "
-                    "arXiv IDs; refusing incomplete metadata."
-                )
-            if start > 0 and page_ids and page_ids.issubset(seen_page_ids):
-                raise RuntimeError(
-                    "arXiv HTML pagination returned a repeated page without new "
-                    f"results at start={start}; refusing incomplete metadata."
-                )
-            seen_page_ids.update(page_ids)
-
-            for result in result_blocks:
-                paper = _parse_search_result(result, target_date)
-                if paper is not None:
-                    papers_by_id.setdefault(paper.arxiv_id, paper)
-                    if len(papers_by_id) >= max_results:
-                        break
-
-            # Do not assume that arXiv honored the requested `size`. The server
-            # has historically returned a smaller page, so advance by the
-            # number of rows actually returned rather than by the requested
-            # page size. Continue until an empty page confirms exhaustion.
-            start += len(result_blocks)
-        if len(papers_by_id) >= max_results:
-            break
-
-    papers = sorted(
-        papers_by_id.values(),
-        key=lambda paper: (paper.updated, paper.arxiv_id),
-        reverse=True,
-    )
-    return " | ".join(urls), papers[:max_results]
-
-
-def build_listing_url(
-    *, category: str, start: int = 0, show: int = DEFAULT_LISTING_PAGE_SIZE
-) -> str:
-    base = ARXIV_LISTING_URL_TEMPLATE.format(category=category)
-    return f"{base}?{urlencode({'skip': str(start), 'show': str(show)})}"
-
-
-def parse_listing_announcement_date(html: str) -> date | None:
-    match = re.search(LISTING_ANNOUNCEMENT_PATTERN, html)
-    if match is None:
-        return None
-    day, month_name, year = match.groups()
-    try:
-        return datetime.strptime(f"{day} {month_name} {year}", "%d %B %Y").date()
-    except ValueError:
-        return None
-
-
-def parse_listing_html(html: str, *, announcement_date: date) -> list[Paper]:
-    block = _listing_new_submission_block(html)
-    if block is None:
-        return []
-
-    papers: list[Paper] = []
-    for dt_block, dd_block in _listing_entry_blocks(block):
-        paper = _parse_listing_entry(dt_block, dd_block, announcement_date=announcement_date)
-        if paper is not None:
-            papers.append(paper)
-    return papers
-
-
-def _listing_new_submission_block(html: str) -> str | None:
-    for part in re.split(r"<h3>", html):
-        if part.startswith("New submissions"):
-            _, _, rest = part.partition("</h3>")
-            return rest or part
-    return None
-
-
-def _listing_entry_blocks(block: str) -> list[tuple[str, str]]:
-    return re.findall(r"<dt>(.*?)</dt>\s*<dd>(.*?)</dd>", block, flags=re.S)
-
-
-def _listing_section_counts(html: str) -> tuple[int | None, int | None]:
-    match = re.search(LISTING_SECTION_COUNTS_PATTERN, html)
-    if match is None:
-        return None, None
-    return int(match.group(1)), int(match.group(2))
-
-
-def _parse_listing_entry(dt_block: str, dd_block: str, *, announcement_date: date) -> Paper | None:
-    arxiv_id = _first_match(r'href\s*=\s*"/abs/([^"]+)"', dt_block)
-    if arxiv_id is None:
-        return None
-    bare_id = re.sub(r"v\d+$", "", arxiv_id)
-
-    title = _html_text(
-        _first_match(
-            r"list-title mathjax'>\s*<span class='descriptor'>Title:</span>\s*(.*?)\s*</div>",
-            dd_block,
-        )
-    )
-    summary = _html_text(_first_match(r"<p class='mathjax'>\s*(.*?)\s*</p>", dd_block))
-    authors_block = _first_match(r"<div class='list-authors'>(.*?)</div>", dd_block) or ""
-    authors = [
-        _html_text(author)
-        for author in re.findall(r"<a\b[^>]*>(.*?)</a>", authors_block, flags=re.S)
-    ]
-    authors = [author for author in authors if author]
-
-    subjects_block = _first_match(r"<div class='list-subjects'>(.*?)</div>", dd_block) or ""
-    categories = re.findall(r"\(([A-Za-z][A-Za-z\-]*(?:\.[A-Za-z\-]+)?)\)", subjects_block)
-    primary = _first_match(r'<span class="primary-subject">.*?\(([^)]+)\)</span>', subjects_block)
-    comment = _html_text(
-        _first_match(
-            r"list-comments mathjax'>\s*<span class='descriptor'>Comments:</span>\s*(.*?)\s*</div>",
-            dd_block,
-        )
-    )
-
-    # The new-listing page carries no per-paper submission timestamp. The
-    # announcement date is the best available placeholder and is replaced by
-    # fetch_papers_by_ids when the arXiv API is reachable.
-    timestamp = _date_to_arxiv_timestamp(announcement_date)
-    return Paper(
-        arxiv_id=bare_id,
-        title=title,
-        authors=authors,
-        summary=summary,
-        categories=categories,
-        primary_category=primary or (categories[0] if categories else None),
-        published=timestamp,
-        updated=timestamp,
-        abs_url=f"https://arxiv.org/abs/{bare_id}",
-        pdf_url=f"https://arxiv.org/pdf/{bare_id}",
-        comment=comment or None,
-    )
-
-
-def fetch_papers_from_listing(
-    *,
-    base_url: str | None,
-    categories: list[str],
-    target_date: date,
-    max_results: int,
-    timeout_seconds: int,
-) -> tuple[str, list[Paper]]:
-    """Fetch the arXiv announcement batch for ``target_date``.
-
-    Unlike the API and advanced-search paths, which select by submission date,
-    this reads ``arxiv.org/list/<category>/new``, i.e. the batch that was
-    announced on ``target_date``. Weekend and moderator-held submissions are
-    announced together with the following batch, so this is the only way to
-    reproduce what a reader sees on the listing page that day.
-    """
-    papers_by_id: dict[str, Paper] = {}
-    urls: list[str] = []
-
-    for category in categories:
-        _collect_listing_category(
-            category=category,
-            target_date=target_date,
-            papers_by_id=papers_by_id,
-            urls=urls,
-            max_results=max_results,
-            timeout_seconds=timeout_seconds,
-        )
-        if len(papers_by_id) >= max_results:
-            break
-
-    papers, enrichment_error = _enrich_listing_papers(
-        base_url=base_url,
-        papers=list(papers_by_id.values()),
-        timeout_seconds=timeout_seconds,
-    )
-    papers.sort(key=lambda paper: (paper.updated, paper.arxiv_id), reverse=True)
-
-    query = " | ".join(urls)
-    if enrichment_error is not None:
-        query = f"{query} [submission timestamps not enriched by the arXiv API: {enrichment_error}]"
-    return query, papers[:max_results]
-
-
-def _collect_listing_category(
-    *,
-    category: str,
-    target_date: date,
-    papers_by_id: dict[str, Paper],
-    urls: list[str],
-    max_results: int,
-    timeout_seconds: int,
-) -> None:
-    start = 0
-    seen_page_ids: set[str] = set()
-    while len(papers_by_id) < max_results:
-        url = build_listing_url(category=category, start=start)
-        urls.append(url)
-        html = fetch_url(
-            url,
-            timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS),
-            user_agent=HTML_USER_AGENT,
-        ).decode("utf-8", errors="replace")
-
-        announcement_date = _require_listing_announcement_date(html, target_date)
-        entries = _require_listing_entries(html)
-        if not entries:
-            return
-
-        page_ids = _store_listing_entries(entries, announcement_date, papers_by_id, max_results)
-        if start > 0 and page_ids and page_ids.issubset(seen_page_ids):
-            raise RuntimeError(
-                "arXiv new-listing pagination returned a repeated page without new "
-                f"results at start={start}; refusing incomplete metadata."
-            )
-        seen_page_ids.update(page_ids)
-
-        _, total = _listing_section_counts(html)
-        start += len(entries)
-        if total is None or start >= total:
-            return
-
-
-def _require_listing_announcement_date(html: str, target_date: date) -> date:
-    announcement_date = parse_listing_announcement_date(html)
-    if announcement_date is None:
-        raise RuntimeError(
-            "Could not read the announcement date from the arXiv new-listing page; "
-            "refusing to emit metadata of ambiguous date."
-        )
-    if announcement_date != target_date:
-        raise RuntimeError(
-            "arxiv.org currently lists new submissions for "
-            f"{announcement_date.isoformat()}, not the requested "
-            f"{target_date.isoformat()}. The new-listing page only exposes the most "
-            "recent announcement batch."
-        )
-    return announcement_date
-
-
-def _require_listing_entries(html: str) -> list[tuple[str, str]]:
-    block = _listing_new_submission_block(html)
-    if block is None:
-        raise RuntimeError(
-            "The arXiv new-listing page did not contain a 'New submissions' section; "
-            "the page structure may have changed."
-        )
-    return _listing_entry_blocks(block)
-
-
-def _store_listing_entries(
-    entries: list[tuple[str, str]],
-    announcement_date: date,
-    papers_by_id: dict[str, Paper],
-    max_results: int,
-) -> set[str]:
-    page_ids: set[str] = set()
-    for dt_block, dd_block in entries:
-        paper = _parse_listing_entry(dt_block, dd_block, announcement_date=announcement_date)
-        if paper is None:
-            continue
-        page_ids.add(paper.arxiv_id)
-        papers_by_id.setdefault(paper.arxiv_id, paper)
-        if len(papers_by_id) >= max_results:
-            break
-    return page_ids
-
-
-def _enrich_listing_papers(
-    *, base_url: str | None, papers: list[Paper], timeout_seconds: int
-) -> tuple[list[Paper], str | None]:
-    if not base_url or not papers:
-        return papers, None
-    try:
-        enriched = fetch_papers_by_ids(
-            base_url=base_url,
-            ids=[paper.arxiv_id for paper in papers],
-            timeout_seconds=timeout_seconds,
-        )
-    except (HTTPError, URLError, OSError, ParseError, ValueError) as exc:
-        return papers, str(exc)
-    return [enriched.get(paper.arxiv_id, paper) for paper in papers], None
+def strip_version(arxiv_id: str) -> str:
+    return re.sub(r"v\d+$", "", arxiv_id)
 
 
 def fetch_papers_by_ids(
     *, base_url: str, ids: Iterable[str], timeout_seconds: int
 ) -> dict[str, Paper]:
-    clean_ids = [re.sub(r"v\d+$", "", item) for item in ids if item]
+    clean_ids = [strip_version(item) for item in ids if item]
     if not clean_ids:
         return {}
 
     params = {"id_list": ",".join(clean_ids), "max_results": str(len(clean_ids))}
     xml_bytes = fetch_url(f"{base_url}?{urlencode(params)}", timeout_seconds=timeout_seconds)
-    return {re.sub(r"v\d+$", "", paper.arxiv_id): paper for paper in parse_feed(xml_bytes)}
+    return {strip_version(paper.arxiv_id): paper for paper in parse_feed(xml_bytes)}
 
 
-def fetch_url(url: str, *, timeout_seconds: int, user_agent: str = DEFAULT_USER_AGENT) -> bytes:
-    headers = {"User-Agent": user_agent, **BROWSER_REQUEST_HEADERS}
+def fetch_html_page(url: str, *, timeout_seconds: int) -> str:
+    return fetch_url(url, timeout_seconds=max(timeout_seconds, MIN_HTML_TIMEOUT_SECONDS)).decode(
+        "utf-8", errors="replace"
+    )
+
+
+def fetch_url(url: str, *, timeout_seconds: int) -> bytes:
+    """GET ``url``; an HTTP status error keeps its code as ``urllib.error.HTTPError``."""
+    headers = {"User-Agent": BROWSER_USER_AGENT, **BROWSER_REQUEST_HEADERS}
     try:
         response = requests.get(url, headers=headers, timeout=timeout_seconds)
         response.raise_for_status()
         return response.content
+    except requests.HTTPError as exc:
+        raise HTTPError(url, exc.response.status_code, str(exc), None, None) from exc
     except requests.RequestException as exc:
         raise URLError(str(exc)) from exc
-
-
-def parse_search_html(html: str, *, target_date: date) -> list[Paper]:
-    results = _search_result_blocks(html)
-    papers: list[Paper] = []
-
-    for result in results:
-        paper = _parse_search_result(result, target_date)
-        if paper is not None:
-            papers.append(paper)
-
-    return papers
-
-
-def _search_result_blocks(html: str) -> list[str]:
-    return re.findall(r'<li class="arxiv-result">(.*?)</li>', html, flags=re.S)
-
-
-def _search_result_arxiv_id(result: str) -> str | None:
-    arxiv_id = _first_match(r'href="https://arxiv\.org/abs/([^"]+)"', result)
-    if arxiv_id is None:
-        arxiv_id = _first_match(r'href="/abs/([^"]+)"', result)
-    return re.sub(r"v\d+$", "", arxiv_id) if arxiv_id is not None else None
 
 
 def parse_feed(xml_bytes: bytes) -> list[Paper]:
@@ -533,10 +74,10 @@ def parse_feed(xml_bytes: bytes) -> list[Paper]:
     for entry in root.findall("atom:entry", NS):
         abs_url = _required_text(entry, "atom:id")
         arxiv_id = abs_url.rstrip("/").split("/")[-1]
-        title = _clean_text(_required_text(entry, "atom:title"))
-        summary = _clean_text(_required_text(entry, "atom:summary"))
+        title = clean_text(_required_text(entry, "atom:title"))
+        summary = clean_text(_required_text(entry, "atom:summary"))
         authors = [
-            _clean_text(name.text or "")
+            clean_text(name.text or "")
             for name in entry.findall("atom:author/atom:name", NS)
             if (name.text or "").strip()
         ]
@@ -588,163 +129,12 @@ def _optional_text(entry: ElementTree.Element, path: str) -> str | None:
     found = entry.find(path, NS)
     if found is None or found.text is None:
         return None
-    text = _clean_text(found.text)
+    text = clean_text(found.text)
     return text or None
 
 
-def _clean_text(value: str) -> str:
+def clean_text(value: str) -> str:
     return " ".join(value.split())
-
-
-def _classification_params(category: str) -> dict[str, str]:
-    if category in PHYSICS_ARCHIVES:
-        return {
-            "classification-physics": "y",
-            "classification-physics_archives": category,
-        }
-    for prefix, field_name in CATEGORY_PREFIX_CLASSIFICATION.items():
-        if category.startswith(prefix):
-            return {field_name: "y"}
-    return {}
-
-
-def _html_page_size(max_results: int) -> int:
-    for page_size in HTML_SEARCH_PAGE_SIZES:
-        if max_results <= page_size:
-            return page_size
-    return MAX_WEB_SEARCH_PAGE_SIZE
-
-
-def _parse_search_result(result: str, target_date: date) -> Paper | None:
-    arxiv_id = _first_match(r'href="https://arxiv\.org/abs/([^"]+)"', result)
-    if arxiv_id is None:
-        arxiv_id = _first_match(r'href="/abs/([^"]+)"', result)
-    if arxiv_id is None:
-        return None
-
-    submitted_date = _parse_submitted_date(result)
-    first_submission_date = _parse_v1_date(result) or submitted_date
-    if first_submission_date != target_date:
-        return None
-
-    title = _html_text(_first_match(r'<p class="title is-5 mathjax">\s*(.*?)\s*</p>', result))
-    summary = _extract_abstract(result)
-    authors = _extract_authors(result)
-    categories = _extract_categories(result)
-    updated = _date_to_arxiv_timestamp(submitted_date)
-    published = _date_to_arxiv_timestamp(first_submission_date)
-
-    return Paper(
-        arxiv_id=re.sub(r"v\d+$", "", arxiv_id),
-        title=title,
-        authors=authors,
-        summary=summary,
-        categories=categories,
-        primary_category=categories[0] if categories else None,
-        published=published,
-        updated=updated,
-        abs_url=f"https://arxiv.org/abs/{arxiv_id}",
-        pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
-        doi=_extract_doi(result),
-        journal_ref=_extract_labeled_paragraph(result, "Journal ref"),
-        comment=_extract_labeled_paragraph(result, "Comments"),
-    )
-
-
-def _first_match(pattern: str, value: str) -> str | None:
-    match = re.search(pattern, value, flags=re.S)
-    if match is None:
-        return None
-    return match.group(1)
-
-
-def _html_text(value: str | None) -> str:
-    if not value:
-        return ""
-    without_scripts = re.sub(r"<script\b.*?</script>", " ", value, flags=re.S | re.I)
-    without_anchors = re.sub(r"<a\b.*?</a>", " ", without_scripts, flags=re.S | re.I)
-    without_tags = re.sub(r"<[^>]+>", " ", without_anchors)
-    return _clean_text(unescape(without_tags))
-
-
-def _extract_authors(result: str) -> list[str]:
-    authors_block = _first_match(r'<p class="authors">(.*?)</p>', result)
-    if authors_block is None:
-        return []
-    return [
-        _html_text(author)
-        for author in re.findall(r"<a\b[^>]*>(.*?)</a>", authors_block, flags=re.S)
-        if _html_text(author)
-    ]
-
-
-def _extract_categories(result: str) -> list[str]:
-    tags = re.findall(r'<span class="tag[^"]*"[^>]*>(.*?)</span>', result, flags=re.S)
-    return [tag for tag in (_html_text(item) for item in tags) if tag]
-
-
-def _extract_abstract(result: str) -> str:
-    full_abstract = _first_match(
-        r'<span class="abstract-full[^"]*"[^>]*>\s*(.*?)\s*</span>',
-        result,
-    )
-    if full_abstract is not None:
-        return _html_text(full_abstract)
-
-    abstract_block = _first_match(r'<p class="abstract mathjax">\s*(.*?)\s*</p>', result)
-    if abstract_block is None:
-        return ""
-    return re.sub(r"^Abstract\s*:\s*", "", _html_text(abstract_block)).strip()
-
-
-def _parse_submitted_date(result: str) -> date | None:
-    submitted = _first_match(r"<strong>Submitted</strong>\s*([^;<]+)", result)
-    if submitted is None:
-        submitted = _first_match(
-            r"has-text-weight-semibold[^>]*>Submitted</span>\s*([^;<]+)",
-            result,
-        )
-    return _parse_display_date(submitted)
-
-
-def _parse_v1_date(result: str) -> date | None:
-    v1_submitted = _first_match(r"<strong>v1</strong>\s*submitted\s*([^;<]+)", result)
-    if v1_submitted is None:
-        v1_submitted = _first_match(
-            r"has-text-weight-semibold[^>]*>v1</span>\s*submitted\s*([^;<]+)",
-            result,
-        )
-    return _parse_display_date(v1_submitted)
-
-
-def _parse_display_date(value: str | None) -> date | None:
-    if value is None:
-        return None
-    clean_value = _html_text(value)
-    try:
-        return datetime.strptime(clean_value, "%d %B, %Y").date()
-    except ValueError:
-        return None
-
-
-def _date_to_arxiv_timestamp(value: date | None) -> str:
-    if value is None:
-        value = date(1970, 1, 1)
-    return datetime.combine(value, datetime.min.time(), timezone.utc).isoformat()
-
-
-def _extract_doi(result: str) -> str | None:
-    doi = _first_match(r'href="https://doi\.org/([^"]+)"', result)
-    return _html_text(doi) if doi else None
-
-
-def _extract_labeled_paragraph(result: str, label: str) -> str | None:
-    for paragraph in re.findall(r'<p class="comments is-size-7">\s*(.*?)\s*</p>', result, re.S):
-        text = _html_text(paragraph)
-        prefix = f"{label}:"
-        if text.startswith(prefix):
-            return text.removeprefix(prefix).strip() or None
-    return None
 
 
 def extract_source_data(data: bytes, arxiv_id: str, output_dir: Path) -> None:
@@ -832,7 +222,7 @@ def download_paper_source_or_pdf(
     # Try downloading the source package first
     try:
         print(f"Downloading source from {source_url}...")
-        data = fetch_url(source_url, timeout_seconds=timeout_seconds, user_agent=HTML_USER_AGENT)
+        data = fetch_url(source_url, timeout_seconds=timeout_seconds)
         extract_source_data(data, arxiv_id, output_dir)
         print(f"Successfully downloaded and extracted source for {arxiv_id} to {output_dir}")
         return "source", True
@@ -845,7 +235,7 @@ def download_paper_source_or_pdf(
 
     try:
         print(f"Falling back to downloading PDF from {pdf_url}...")
-        data = fetch_url(pdf_url, timeout_seconds=timeout_seconds, user_agent=HTML_USER_AGENT)
+        data = fetch_url(pdf_url, timeout_seconds=timeout_seconds)
         output_dir.mkdir(parents=True, exist_ok=True)
         dest_file = output_dir / f"{arxiv_id}.pdf"
         dest_file.write_bytes(data)

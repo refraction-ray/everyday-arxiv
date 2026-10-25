@@ -18,6 +18,8 @@ class Paper:
     doi: str | None = None
     journal_ref: str | None = None
     comment: str | None = None
+    # "new" or "cross" for a paper taken from an announcement batch, else None.
+    listing_section: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

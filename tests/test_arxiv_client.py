@@ -2,30 +2,19 @@ import gzip
 import io
 import tarfile
 import zipfile
-from datetime import date
-from urllib.parse import parse_qs, urlparse
-from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import pytest
+import requests
 
 from arxiv_daily.arxiv_client import (
     BROWSER_REQUEST_HEADERS,
     BROWSER_USER_AGENT,
-    build_listing_url,
-    fetch_papers_from_html,
-    fetch_papers_from_listing,
-    fetch_url,
-    parse_listing_announcement_date,
-    parse_listing_html,
-    parse_search_html,
-    extract_source_data,
     download_paper_source_or_pdf,
-)
-from arxiv_daily.cli import (
-    main,
-    _find_paper_date_locally,
-    _fetch_paper_date_from_api,
+    extract_source_data,
+    fetch_url,
+    strip_version,
 )
 
 
@@ -56,126 +45,25 @@ def test_fetch_url_uses_browser_like_headers(monkeypatch):
     assert captured["timeout"] == 12
 
 
-def test_html_parser_excludes_revisions_from_submitted_date_batch():
-    html = """
-    <ol>
-      <li class="arxiv-result">
-        <p class="list-title is-inline-block">
-          <a href="https://arxiv.org/abs/2512.18995v2">arXiv:2512.18995</a>
-        </p>
-        <p class="title is-5 mathjax">DeepQuantum</p>
-        <p class="authors"><a>Author One</a></p>
-        <div class="tags"><span class="tag is-small">quant-ph</span></div>
-        <p class="abstract mathjax">Abstract: Revised software paper.</p>
-        <p class="is-size-7">
-          <span class="has-text-weight-semibold">Submitted</span> 14 May, 2026;
-          <span class="has-text-weight-semibold">v1</span> submitted 21 December, 2025;
-        </p>
-      </li>
-    </ol>
-    """
+def test_fetch_url_keeps_the_http_status_code(monkeypatch):
+    class FakeResponse:
+        status_code = 400
 
-    papers = parse_search_html(html, target_date=date(2026, 5, 14))
+        def raise_for_status(self):
+            raise requests.HTTPError("400 Client Error: Bad Request", response=self)
 
-    assert papers == []
-
-
-def test_html_parser_keeps_first_submissions_from_submitted_date_batch():
-    html = """
-    <ol>
-      <li class="arxiv-result">
-        <p class="list-title is-inline-block">
-          <a href="https://arxiv.org/abs/2605.12345v1">arXiv:2605.12345</a>
-        </p>
-        <p class="title is-5 mathjax">New Quantum Paper</p>
-        <p class="authors"><a>Author One</a><a>Author Two</a></p>
-        <div class="tags"><span class="tag is-small">quant-ph</span></div>
-        <p class="abstract mathjax">Abstract: First submission.</p>
-        <p class="is-size-7">
-          <span class="has-text-weight-semibold">Submitted</span> 14 May, 2026;
-          <span class="has-text-weight-semibold">v1</span> submitted 14 May, 2026;
-        </p>
-      </li>
-    </ol>
-    """
-
-    papers = parse_search_html(html, target_date=date(2026, 5, 14))
-
-    assert len(papers) == 1
-    assert papers[0].arxiv_id == "2605.12345"
-    assert papers[0].summary == "First submission."
-    assert papers[0].published.startswith("2026-05-14")
-    assert papers[0].updated.startswith("2026-05-14")
-
-
-def _html_search_result(arxiv_id: str, title: str) -> str:
-    return f"""
-    <li class="arxiv-result">
-      <p class="list-title is-inline-block">
-        <a href="https://arxiv.org/abs/{arxiv_id}v1">arXiv:{arxiv_id}v1</a>
-      </p>
-      <p class="title is-5 mathjax">{title}</p>
-      <p class="authors"><a>Author One</a></p>
-      <div class="tags"><span class="tag is-small">quant-ph</span></div>
-      <p class="abstract mathjax">Abstract: {title} abstract.</p>
-      <p class="is-size-7">
-        <span class="has-text-weight-semibold">Submitted</span> 21 September, 2026;
-        <span class="has-text-weight-semibold">v1</span> submitted 21 September, 2026;
-      </p>
-    </li>
-    """
-
-
-def test_html_fetch_paginates_using_rows_actually_returned(monkeypatch):
-    pages = {
-        0: _html_search_result("2609.25201", "First page one")
-        + _html_search_result("2609.25202", "First page two"),
-        2: _html_search_result("2609.25203", "Second page one"),
-        3: "<ol></ol>",
-    }
-    requested_starts = []
-
-    def fake_fetch(url, *, timeout_seconds, user_agent):
-        del timeout_seconds, user_agent
-        start = int(parse_qs(urlparse(url).query)["start"][0])
-        requested_starts.append(start)
-        return pages[start].encode("utf-8")
-
-    monkeypatch.setattr("arxiv_daily.arxiv_client.fetch_url", fake_fetch)
-
-    _, papers = fetch_papers_from_html(
-        categories=["quant-ph"],
-        target_date=date(2026, 9, 21),
-        max_results=200,
-        timeout_seconds=1,
+    monkeypatch.setattr(
+        "arxiv_daily.arxiv_client.requests.get", lambda url, headers, timeout: FakeResponse()
     )
 
-    assert requested_starts == [0, 2, 3]
-    assert [paper.arxiv_id for paper in papers] == [
-        "2609.25203",
-        "2609.25202",
-        "2609.25201",
-    ]
+    with pytest.raises(HTTPError) as excinfo:
+        fetch_url("https://arxiv.org/catchup/quant-ph/2025-01-15", timeout_seconds=5)
+    assert excinfo.value.code == 400
 
 
-def test_html_fetch_rejects_repeated_page(monkeypatch):
-    page = _html_search_result("2609.25201", "Repeated page")
-
-    def fake_fetch(url, *, timeout_seconds, user_agent):
-        del timeout_seconds, user_agent
-        start = int(parse_qs(urlparse(url).query)["start"][0])
-        assert start in {0, 1}
-        return page.encode("utf-8")
-
-    monkeypatch.setattr("arxiv_daily.arxiv_client.fetch_url", fake_fetch)
-
-    with pytest.raises(RuntimeError, match="repeated page"):
-        fetch_papers_from_html(
-            categories=["quant-ph"],
-            target_date=date(2026, 9, 21),
-            max_results=200,
-            timeout_seconds=1,
-        )
+def test_strip_version():
+    assert strip_version("2610.11111v3") == "2610.11111"
+    assert strip_version("2610.11111") == "2610.11111"
 
 
 def test_extract_source_data_tar_gz(tmp_path):
@@ -261,177 +149,3 @@ def test_download_paper_source_failed_fallback_pdf_success(mock_fetch, tmp_path)
     assert download_type == "pdf"
     assert (tmp_path / "2605.12345.pdf").exists()
     assert (tmp_path / "2605.12345.pdf").read_bytes() == b"%PDF-1.4\npdf content"
-
-
-def test_find_paper_date_locally(tmp_path):
-    # Set up mock raw arxiv output directory with date folder and json cache
-    date_dir = tmp_path / "2026-05-14"
-    date_dir.mkdir(parents=True)
-    json_cache = date_dir / "quant-ph.json"
-
-    import json
-
-    cache_data = {
-        "papers": [
-            {"arxiv_id": "2605.12345", "title": "Paper 1"},
-            {"arxiv_id": "2605.67890", "title": "Paper 2"},
-        ]
-    }
-    json_cache.write_text(json.dumps(cache_data), encoding="utf-8")
-
-    found_date = _find_paper_date_locally(tmp_path, "2605.12345")
-    assert found_date == date(2026, 5, 14)
-
-    not_found = _find_paper_date_locally(tmp_path, "non-existent")
-    assert not_found is None
-
-
-@patch("arxiv_daily.cli.fetch_url")
-@patch("arxiv_daily.cli.parse_feed")
-def test_fetch_paper_date_from_api(mock_parse, mock_fetch):
-    # Mocking parser response
-    from arxiv_daily.models import Paper
-
-    mock_paper = Paper(
-        arxiv_id="2605.12345",
-        title="Title",
-        authors=[],
-        summary="",
-        categories=[],
-        primary_category=None,
-        published="2026-05-14T12:00:00Z",
-        updated="2026-05-14T12:00:00Z",
-        abs_url="",
-        pdf_url="",
-    )
-    mock_parse.return_value = [mock_paper]
-    mock_fetch.return_value = b"<xml>...</xml>"
-
-    found_date = _fetch_paper_date_from_api("2605.12345")
-    assert found_date == date(2026, 5, 14)
-
-
-LISTING_HTML = """
-<dl id='articles'>
-  <h3>Showing new listings for Tuesday, 20 October 2026</h3>
-  <h3>New submissions (showing 2 of 2 entries)</h3>
-  <dt>
-    <a href ="/abs/2610.11111" title="Abstract" id="2610.11111">arXiv:2610.11111</a>
-  </dt>
-  <dd>
-    <div class='meta'>
-      <div class='list-title mathjax'><span class='descriptor'>Title:</span>
-        A test title on block listings
-      </div>
-      <div class='list-authors'><a href="https://arxiv.org/search/quant-ph?query=A">Alice A</a>, <a href="https://arxiv.org/search/quant-ph?query=B">Bob B</a></div>
-      <div class='list-comments mathjax'><span class='descriptor'>Comments:</span> 12 pages, 3 figures</div>
-      <div class='list-subjects'><span class='descriptor'>Subjects:</span>
-        <span class="primary-subject">Quantum Physics (quant-ph)</span>; Information Theory (cs.IT)
-      </div>
-      <p class='mathjax'>
-        An abstract of the test paper with enough words to be parsed.
-      </p>
-    </div>
-  </dd>
-  <dt>
-    <a href ="/abs/2610.22222" title="Abstract" id="2610.22222">arXiv:2610.22222</a>
-  </dt>
-  <dd>
-    <div class='meta'>
-      <div class='list-title mathjax'><span class='descriptor'>Title:</span>
-        Second paper without comments
-      </div>
-      <div class='list-authors'><a href="https://arxiv.org/search/quant-ph?query=C">Carol C</a></div>
-      <div class='list-subjects'><span class='descriptor'>Subjects:</span>
-        <span class="primary-subject">Quantum Physics (quant-ph)</span>
-      </div>
-      <p class='mathjax'>Second abstract text.</p>
-    </div>
-  </dd>
-  <h3>Cross submissions (showing 1 of 1 entries)</h3>
-  <dt>
-    <a href ="/abs/2610.33333" title="Abstract" id="2610.33333">arXiv:2610.33333</a>
-  </dt>
-  <dd>
-    <div class='meta'>
-      <div class='list-title mathjax'><span class='descriptor'>Title:</span>
-        A cross-listed paper that must be excluded
-      </div>
-      <p class='mathjax'>Cross listed abstract.</p>
-    </div>
-  </dd>
-</dl>
-"""
-
-
-def test_listing_parser_reads_announcement_date():
-    assert parse_listing_announcement_date(LISTING_HTML) == date(2026, 10, 20)
-    assert parse_listing_announcement_date("<html>no listing header</html>") is None
-
-
-def test_listing_parser_reads_new_submissions_only():
-    papers = parse_listing_html(LISTING_HTML, announcement_date=date(2026, 10, 20))
-
-    assert [paper.arxiv_id for paper in papers] == ["2610.11111", "2610.22222"]
-    first = papers[0]
-    assert first.title == "A test title on block listings"
-    assert first.authors == ["Alice A", "Bob B"]
-    assert first.summary == "An abstract of the test paper with enough words to be parsed."
-    assert first.categories == ["quant-ph", "cs.IT"]
-    assert first.primary_category == "quant-ph"
-    assert first.comment == "12 pages, 3 figures"
-    assert first.abs_url == "https://arxiv.org/abs/2610.11111"
-    assert first.published.startswith("2026-10-20")
-    assert papers[1].comment is None
-
-
-def test_listing_url_targets_new_page():
-    url = build_listing_url(category="quant-ph")
-    assert url.startswith("https://arxiv.org/list/quant-ph/new?")
-    assert "show=2000" in url
-    assert "skip=0" in url
-
-
-def test_listing_fetch_rejects_other_announcement_date(monkeypatch):
-    monkeypatch.setattr(
-        "arxiv_daily.arxiv_client.fetch_url",
-        lambda url, timeout_seconds, user_agent=None: LISTING_HTML.encode(),
-    )
-
-    with pytest.raises(RuntimeError, match="not the requested"):
-        fetch_papers_from_listing(
-            base_url=None,
-            categories=["quant-ph"],
-            target_date=date(2026, 10, 21),
-            max_results=10,
-            timeout_seconds=5,
-        )
-
-
-def test_cli_list_source_dispatches_to_listing(monkeypatch, tmp_path):
-    captured = {}
-
-    def fake_listing(**kwargs):
-        captured.update(kwargs)
-        return "listing-url", []
-
-    monkeypatch.setattr("arxiv_daily.cli.fetch_papers_from_listing", fake_listing)
-
-    exit_code = main(
-        [
-            "fetch",
-            "--date",
-            "2026-10-20",
-            "--category",
-            "quant-ph",
-            "--source",
-            "list",
-            "--output-dir",
-            str(tmp_path),
-        ]
-    )
-
-    assert exit_code == 0
-    assert captured["target_date"] == date(2026, 10, 20)
-    assert captured["categories"] == ["quant-ph"]
-    assert (tmp_path / "2026-10-20" / "quant-ph.json").exists()

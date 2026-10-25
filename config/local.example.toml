@@ -3,9 +3,7 @@
 
 [arxiv]
 # default_categories = ["quant-ph", "cond-mat.mes-hall"]
-# max_results = 300
+# request_timeout_seconds = 60
 
 [paths]
 # raw_arxiv_dir = "data/raw/arxiv"
-# reports_dir = "data/reports"
-# user_profile_dir = "user_profile"

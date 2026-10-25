@@ -6,22 +6,24 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from xml.etree.ElementTree import ParseError
 
-from .arxiv_client import (
+from .announcement_batch import (
+    CatchupOutOfRange,
+    build_catchup_url,
     build_listing_url,
-    build_search_query,
-    fetch_papers,
-    fetch_papers_from_html,
-    fetch_papers_from_listing,
+    fetch_papers_from_announcement_batch,
+)
+from .arxiv_client import (
     download_paper_source_or_pdf,
-    fetch_url,
-    parse_feed,
+    fetch_papers_by_ids,
+    strip_version,
 )
 from .config import load_config
-from .models import Paper
 from .scholar_client import bootstrap_scholar_profile
+from .submitted_slice import fetch_submitted_slice
+
+SUBMITTED_SLICE_SOURCE = "api-submitted-slice"
+ANNOUNCEMENT_SOURCES = {"list", "catchup"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,9 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="arXiv Daily assistant tooling")
     subparsers = parser.add_subparsers(dest="command")
 
-    fetch = subparsers.add_parser("fetch", help="Fetch arXiv metadata into a JSON cache")
+    fetch = subparsers.add_parser("fetch", help="Fetch one arXiv announcement batch into a cache")
     fetch.add_argument(
-        "--date", default=None, help="Target arXiv submitted date, YYYY-MM-DD. Defaults to today."
+        "--date",
+        default=None,
+        help=(
+            "Announcement date, YYYY-MM-DD. Defaults to today. The current batch is read from "
+            "arxiv.org/list/<category>/new; a past one from arxiv.org/catchup/<category>/<date> "
+            "(the past 90 days)."
+        ),
     )
     fetch.add_argument(
         "--category",
@@ -53,23 +61,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="arXiv category, repeatable. Defaults to config.",
     )
-    fetch.add_argument("--max-results", type=int, default=None, help="Maximum papers to fetch.")
-    fetch.add_argument("--page-size", type=int, default=None, help="arXiv API page size.")
+    fetch.add_argument(
+        "--max-results",
+        type=int,
+        default=None,
+        help="Optional cap; the whole batch is kept by default and a cap is reported.",
+    )
     fetch.add_argument("--config", default="config/default.toml", help="Path to TOML config.")
     fetch.add_argument(
         "--output-dir", default=None, help="Root output directory for raw arXiv caches."
     )
     fetch.add_argument(
-        "--dry-run", action="store_true", help="Print query and output path without network access."
+        "--dry-run",
+        action="store_true",
+        help="Print the candidate listing/catch-up URLs and output path without network access.",
     )
     fetch.add_argument(
-        "--source",
-        choices=["auto", "api", "html", "list"],
-        default="auto",
+        "--no-api",
+        action="store_true",
         help=(
-            "Metadata source. auto uses the arXiv API first, then arxiv.org HTML search; "
-            "api and html select by submission date; list reads arxiv.org/list/<category>/new, "
-            "i.e. the announcement batch for the requested date."
+            "Never call the arXiv API. Skips the optional enrichment that fills real submission "
+            "timestamps (the batch itself always comes from the arxiv.org listing page), and "
+            "disables the submittedDate-slice fallback for dates beyond the catch-up window."
         ),
     )
 
@@ -132,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--date",
         default=None,
-        help="Target arXiv submitted date, YYYY-MM-DD. If omitted, auto-resolves from cache/API.",
+        help="Batch date (source folder), YYYY-MM-DD. If omitted, auto-resolves from cache/API.",
     )
     download.add_argument(
         "--delay-seconds",
@@ -158,36 +171,69 @@ def run_fetch(args: argparse.Namespace) -> int:
 
     target_date = _parse_date(args.date) if args.date else date.today()
     categories = args.category or list(arxiv_config["default_categories"])
-    max_results = args.max_results or int(arxiv_config["max_results"])
-    page_size = args.page_size or int(arxiv_config["page_size"])
+    max_results = args.max_results
     output_root = Path(args.output_dir or path_config["raw_arxiv_dir"])
     output_path = _output_path(output_root, target_date, categories)
-    if args.source == "list":
-        search_query = " | ".join(build_listing_url(category=category) for category in categories)
-    else:
-        search_query = build_search_query(categories, target_date)
+    api_url = str(arxiv_config["base_url"])
+    timeout_seconds = int(arxiv_config["request_timeout_seconds"])
 
     if args.dry_run:
         preview_url = {
             "date": target_date.isoformat(),
             "categories": categories,
-            "search_query": search_query,
+            "listing_url": " | ".join(
+                build_listing_url(category=category) for category in categories
+            ),
+            "catchup_url": " | ".join(
+                build_catchup_url(category=category, target_date=target_date)
+                for category in categories
+            ),
             "output_path": str(output_path),
             "max_results": max_results,
-            "page_size": page_size,
-            "source": args.source,
+            "api_enrichment": not args.no_api,
         }
         print(json.dumps(preview_url, indent=2, ensure_ascii=False))
         return 0
 
-    query, papers, source, fallback_error = _fetch_with_source(
-        source=args.source,
-        arxiv_config=arxiv_config,
-        categories=categories,
-        target_date=target_date,
-        max_results=max_results,
-        page_size=page_size,
-    )
+    try:
+        query, papers, source = fetch_papers_from_announcement_batch(
+            base_url=None if args.no_api else api_url,
+            categories=categories,
+            target_date=target_date,
+            timeout_seconds=timeout_seconds,
+        )
+    except CatchupOutOfRange as exc:
+        if output_path.exists():
+            raise RuntimeError(
+                f"{exc} A cache already exists at {output_path}, so it is left untouched. "
+                "Delete that file explicitly if you really want to re-fetch this date."
+            ) from exc
+        if args.no_api:
+            raise RuntimeError(
+                f"{exc} The only remaining route is a submittedDate slice from the arXiv API, "
+                "which --no-api disables; drop --no-api to use it."
+            ) from exc
+        print(
+            f"Warning: {exc}\n"
+            "Falling back to a submittedDate slice from the arXiv API. This is NOT the "
+            "announcement batch: it misses papers announced that day but submitted earlier and "
+            "includes some papers announced the next day. Record this in the report."
+        )
+        query, papers = fetch_submitted_slice(
+            base_url=api_url,
+            categories=categories,
+            target_date=target_date,
+            timeout_seconds=timeout_seconds,
+        )
+        source = SUBMITTED_SLICE_SOURCE
+
+    if max_results is not None and len(papers) > max_results:
+        print(
+            f"Warning: fetched {len(papers)} papers; keeping the first {max_results} "
+            "because --max-results was given."
+        )
+        query = f"{query} [truncated to {max_results} of {len(papers)} papers]"
+        papers = papers[:max_results]
 
     payload = {
         "schema_version": 1,
@@ -195,12 +241,13 @@ def run_fetch(args: argparse.Namespace) -> int:
         "date": target_date.isoformat(),
         "categories": categories,
         "source": source,
+        "date_convention": (
+            "submitted_date_slice" if source == SUBMITTED_SLICE_SOURCE else "announcement_batch"
+        ),
         "query": query,
         "count": len(papers),
         "papers": [paper.to_dict() for paper in papers],
     }
-    if fallback_error:
-        payload["fallback_error"] = fallback_error
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -208,58 +255,6 @@ def run_fetch(args: argparse.Namespace) -> int:
     )
     print(f"Wrote {len(papers)} papers to {output_path}")
     return 0
-
-
-def _fetch_with_source(
-    *,
-    source: str,
-    arxiv_config: dict[str, Any],
-    categories: list[str],
-    target_date: date,
-    max_results: int,
-    page_size: int,
-) -> tuple[str, list[Paper], str, str | None]:
-    if source == "html":
-        query, papers = fetch_papers_from_html(
-            categories=categories,
-            target_date=target_date,
-            max_results=max_results,
-            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
-        )
-        return query, papers, "html", None
-
-    if source == "list":
-        query, papers = fetch_papers_from_listing(
-            base_url=str(arxiv_config["base_url"]),
-            categories=categories,
-            target_date=target_date,
-            max_results=max_results,
-            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
-        )
-        return query, papers, "list", None
-
-    try:
-        query, papers = fetch_papers(
-            base_url=str(arxiv_config["base_url"]),
-            categories=categories,
-            target_date=target_date,
-            max_results=max_results,
-            page_size=page_size,
-            sort_by=str(arxiv_config["sort_by"]),
-            sort_order=str(arxiv_config["sort_order"]),
-            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
-        )
-        return query, papers, "api", None
-    except (HTTPError, URLError, OSError, ParseError, ValueError) as exc:
-        if source == "api":
-            raise
-        query, papers = fetch_papers_from_html(
-            categories=categories,
-            target_date=target_date,
-            max_results=max_results,
-            timeout_seconds=int(arxiv_config["request_timeout_seconds"]),
-        )
-        return query, papers, "html", f"arXiv API failed before HTML fallback: {exc}"
 
 
 def run_profile(args: argparse.Namespace) -> int:
@@ -332,29 +327,39 @@ def run_download(args: argparse.Namespace) -> int:
         last_request_time = time.time()
 
     for arxiv_id in args.arxiv_ids:
-        # 1. Determine submission date
+        # 1. Determine the date folder: --date, else a local cache, else the API
         target_date = None
         if args.date:
             target_date = _parse_date(args.date)
         else:
-            # Try to resolve date locally
             target_date = _find_paper_date_locally(output_root, arxiv_id)
             if not target_date:
-                # If not found locally, query API to determine date
                 print(
-                    f"ArXiv ID {arxiv_id} not found in local cache. Querying API to resolve date..."
+                    f"ArXiv ID {arxiv_id} not found in any local date folder. "
+                    "Querying the arXiv API for its submission date..."
                 )
                 wait_for_rate_limit()
-                target_date = _fetch_paper_date_from_api(arxiv_id, timeout_seconds)
-                if not target_date:
+                target_date = _fetch_paper_date_from_api(
+                    arxiv_id,
+                    base_url=str(arxiv_config["base_url"]),
+                    timeout_seconds=timeout_seconds,
+                )
+                if target_date:
+                    print(
+                        f"Warning: filing {arxiv_id} under its v1 submission date {target_date}, "
+                        "not an announcement date; arXiv publishes no announcement date for it. "
+                        "Pass --date to choose the folder explicitly."
+                    )
+                else:
                     target_date = date.today()
                     print(
-                        f"Warning: Could not determine submission date for {arxiv_id}. "
+                        f"Warning: Could not determine a date for {arxiv_id}. "
                         f"Defaulting to today: {target_date}"
                     )
 
-        # The output directory for this paper's source
-        paper_dir = output_root / target_date.isoformat() / "sources" / arxiv_id
+        # The output directory for this paper's source, always under the bare ID so
+        # that every version of a paper shares one folder
+        paper_dir = output_root / target_date.isoformat() / "sources" / strip_version(arxiv_id)
 
         if args.dry_run:
             print(f"[DRY-RUN] Would download source for {arxiv_id} to {paper_dir}")
@@ -386,49 +391,62 @@ def run_download(args: argparse.Namespace) -> int:
 
 
 def _find_paper_date_locally(output_root: Path, arxiv_id: str) -> date | None:
-    # pylint: disable=broad-exception-caught
-    """
-    Tries to find the paper in existing local date-batch metadata JSON files.
+    """Find the date folder that already holds this paper, ignoring version suffixes.
+
+    Every date folder is scanned. An announcement-batch cache that lists the paper
+    beats any other cache (a legacy submitted-date cache or a slice), which beats
+    a ``sources/<id>`` folder from an earlier download; within one rank the
+    earliest date wins, so the result never depends on directory order.
     """
     if not output_root.exists():
         return None
+    bare_id = strip_version(arxiv_id)
+    candidates: list[tuple[int, date]] = []
     for date_dir in output_root.iterdir():
-        if not date_dir.is_dir():
-            continue
         try:
-            d = date.fromisoformat(date_dir.name)
+            folder_date = date.fromisoformat(date_dir.name)
         except ValueError:
             continue
-
-        # Look for json files in this folder
-        for json_file in date_dir.glob("*.json"):
-            if json_file.name == "run_metadata.json":
-                continue
-            try:
-                with json_file.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for paper in data.get("papers", []):
-                        if paper.get("arxiv_id") == arxiv_id:
-                            return d
-            except Exception:
-                continue
-    return None
+        rank = _local_paper_rank(date_dir, bare_id=bare_id)
+        if rank is not None:
+            candidates.append((rank, folder_date))
+    return min(candidates)[1] if candidates else None
 
 
-def _fetch_paper_date_from_api(arxiv_id: str, timeout_seconds: int = 30) -> date | None:
+def _local_paper_rank(date_dir: Path, *, bare_id: str) -> int | None:
+    rank = None
+    for json_file in date_dir.glob("*.json"):
+        try:
+            payload = json.loads(json_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if any(
+            strip_version(str(paper.get("arxiv_id", ""))) == bare_id
+            for paper in payload.get("papers", [])
+        ):
+            if payload.get("source") in ANNOUNCEMENT_SOURCES:
+                return 0
+            rank = 1
+    if rank is None and (date_dir / "sources" / bare_id).is_dir():
+        rank = 2
+    return rank
+
+
+def _fetch_paper_date_from_api(
+    arxiv_id: str, *, base_url: str, timeout_seconds: int = 30
+) -> date | None:
     # pylint: disable=broad-exception-caught
-    """
-    Queries the arXiv API for the paper to retrieve its published date.
-    """
-    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    """Look the paper up in the arXiv API to recover its v1 submission date."""
     try:
-        xml_bytes = fetch_url(url, timeout_seconds=timeout_seconds)
-        papers = parse_feed(xml_bytes)
-        if papers:
-            pub_str = papers[0].published
-            if pub_str:
-                # E.g. "2026-05-14T12:00:00Z" -> "2026-05-14"
-                return date.fromisoformat(pub_str.split("T")[0])
+        papers = fetch_papers_by_ids(
+            base_url=base_url, ids=[arxiv_id], timeout_seconds=timeout_seconds
+        )
+        paper = papers.get(strip_version(arxiv_id))
+        if paper is not None and paper.published:
+            # E.g. "2026-05-14T12:00:00Z" -> "2026-05-14"
+            return date.fromisoformat(paper.published.split("T")[0])
     except Exception as exc:
         print(f"Failed to fetch paper metadata from arXiv API: {exc}")
     return None
