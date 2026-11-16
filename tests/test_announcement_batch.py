@@ -5,6 +5,7 @@ import pytest
 
 from arxiv_daily.announcement_batch import (
     CatchupOutOfRange,
+    NoAnnouncementBatch,
     build_catchup_url,
     build_listing_url,
     fetch_papers_from_announcement_batch,
@@ -128,6 +129,19 @@ MONDAY_CATCHUP = _catchup_page(
     _section("Replacement", [_entry("2607.12345")]),
     total=3,
 )
+# The same batch as TUESDAY_LISTING, read the way a catch-up page presents it.
+TUESDAY_CATCHUP = _catchup_page(
+    TUE,
+    _section("New", [_entry("2610.11111"), _entry("2610.22222")]),
+    _section(
+        "Cross",
+        [
+            _entry("2610.15555", cross_from="cond-mat.str-el"),
+            _entry("2609.00001", cross_from="math-ph"),
+        ],
+    ),
+    total=4,
+)
 TUESDAY_PAGES = {LISTING_URL: TUESDAY_LISTING, _catchup_url(MON): MONDAY_CATCHUP}
 
 
@@ -164,11 +178,11 @@ def test_page_parsers_read_the_announcement_date():
 
 
 def test_listing_batch_keeps_new_papers_and_new_cross_lists(monkeypatch):
-    requested = _serve(monkeypatch, TUESDAY_PAGES)
+    requested = _serve(monkeypatch, {LISTING_URL: TUESDAY_LISTING})
 
     query, papers = _fetch_tuesday()
 
-    assert requested == [LISTING_URL, _catchup_url(MON)]
+    assert requested == [LISTING_URL]
     by_id = {paper.arxiv_id: paper for paper in papers}
     assert set(by_id) == {"2610.11111", "2610.22222", "2610.15555"}
     assert by_id["2610.11111"].listing_section == "new"
@@ -202,14 +216,11 @@ def test_listing_batch_follows_pagination_across_sections(monkeypatch):
         total=4,
     )
     second_url = LISTING_URL.replace("skip=0", "skip=2")
-    requested = _serve(
-        monkeypatch,
-        {LISTING_URL: first_page, second_url: second_page, _catchup_url(MON): MONDAY_CATCHUP},
-    )
+    requested = _serve(monkeypatch, {LISTING_URL: first_page, second_url: second_page})
 
     query, papers = _fetch_tuesday()
 
-    assert requested == [LISTING_URL, second_url, _catchup_url(MON)]
+    assert requested == [LISTING_URL, second_url]
     assert sorted(paper.arxiv_id for paper in papers) == [
         "2610.11111",
         "2610.15555",
@@ -253,52 +264,105 @@ def test_listing_batch_merges_categories_and_prefers_new(monkeypatch):
     assert query == f"{LISTING_URL} | {cond_mat_url}"
 
 
-def test_previous_batch_lookup_skips_days_without_a_batch(monkeypatch):
-    friday, saturday, sunday = date(2026, 10, 16), date(2026, 10, 17), date(2026, 10, 18)
+def test_cross_list_floor_comes_from_this_batchs_first_new_id(monkeypatch):
+    """The floor is derived from this batch, so no other page is ever requested.
+
+    A cross-list above the batch's first new-submission ID is kept, one whose paper
+    predates the batch is dropped. Reading the previous batch instead would cost an
+    extra catch-up page (three of them on a Monday) and would be skewed by a stale
+    CDN copy of that page.
+    """
     monday = _listing_page(
         MON,
         _section("New", [_entry("2610.20000")]),
         _section(
             "Cross",
-            [_entry("2610.19000", cross_from="hep-th"), _entry("2610.17000", cross_from="hep-th")],
+            [_entry("2610.21000", cross_from="hep-th"), _entry("2609.17000", cross_from="hep-th")],
         ),
         total=3,
     )
-    requested = _serve(
-        monkeypatch,
-        {
-            LISTING_URL: monday,
-            _catchup_url(sunday): _catchup_page(sunday, total=0),
-            _catchup_url(saturday): _catchup_page(saturday, total=0),
-            _catchup_url(friday): _catchup_page(
-                friday, _section("New", [_entry("2610.18000")]), total=1
-            ),
-        },
-    )
+    requested = _serve(monkeypatch, {LISTING_URL: monday})
 
     query, papers = fetch_papers_from_listing(
         base_url=None, categories=["quant-ph"], target_date=MON, timeout_seconds=5
     )
 
-    assert requested[1:] == [_catchup_url(sunday), _catchup_url(saturday), _catchup_url(friday)]
-    assert sorted(paper.arxiv_id for paper in papers) == ["2610.19000", "2610.20000"]
-    assert "excluded 1 cross-lists of papers announced earlier: 2610.17000" in query
+    assert requested == [LISTING_URL]
+    assert sorted(paper.arxiv_id for paper in papers) == ["2610.20000", "2610.21000"]
+    assert "excluded 1 cross-lists of papers announced earlier: 2609.17000" in query
 
 
-def test_unavailable_previous_batch_falls_back_to_this_batchs_first_new_id(monkeypatch):
-    _serve(
-        monkeypatch,
-        {
-            LISTING_URL: TUESDAY_LISTING,
-            _catchup_url(MON): HTTPError(_catchup_url(MON), 400, "Bad Request", None, None),
-        },
+def test_same_month_cross_list_below_the_batch_floor_is_kept(monkeypatch):
+    """Regression test for 2026-11-16.
+
+    2611.17366 was submitted after the Friday cut-off and announced with the Monday
+    batch as a cross-list, but its ID sits below every new submission of that batch,
+    so an ID-floor-only filter silently dropped a genuine paper. Sharing the batch's
+    own month keeps it, at the accepted cost of occasionally keeping a same-month
+    paper that was announced earlier.
+    """
+    page = _listing_page(
+        MON,
+        _section("New", [_entry("2610.21000")]),
+        _section(
+            "Cross",
+            [
+                _entry("2610.19000", cross_from="physics.ins-det"),
+                _entry("2609.17000", cross_from="hep-th"),
+            ],
+        ),
+        total=3,
     )
+    _serve(monkeypatch, {LISTING_URL: page})
+
+    _, papers = fetch_papers_from_listing(
+        base_url=None, categories=["quant-ph"], target_date=MON, timeout_seconds=5
+    )
+
+    assert sorted(paper.arxiv_id for paper in papers) == ["2610.19000", "2610.21000"]
+
+
+def test_cross_list_floor_survives_a_month_boundary(monkeypatch):
+    """A first-of-month batch is mostly last month's submissions; keep its cross-lists.
+
+    Filtering by "same YYMM as the batch" would drop every cross-list here, which on
+    2026-11-02 would have been 22 entries: that day's 74 new submissions were all
+    2610.* IDs. The batch's own ID range has no such boundary.
+    """
+    boundary = date(2026, 11, 2)
+    page = _listing_page(
+        boundary,
+        _section("New", [_entry("2610.24444"), _entry("2610.24555")]),
+        _section(
+            "Cross",
+            [
+                _entry("2610.24777", cross_from="cond-mat.str-el"),
+                _entry("2608.11111", cross_from="hep-th"),
+            ],
+        ),
+        total=4,
+    )
+    _serve(monkeypatch, {LISTING_URL: page})
+
+    _, papers = fetch_papers_from_listing(
+        base_url=None, categories=["quant-ph"], target_date=boundary, timeout_seconds=5
+    )
+
+    assert sorted(paper.arxiv_id for paper in papers) == [
+        "2610.24444",
+        "2610.24555",
+        "2610.24777",
+    ]
+
+
+def test_cross_list_filter_never_reads_another_page(monkeypatch):
+    requested = _serve(monkeypatch, {LISTING_URL: TUESDAY_LISTING})
 
     query, papers = _fetch_tuesday()
 
+    assert requested == [LISTING_URL]
     assert sorted(paper.arxiv_id for paper in papers) == ["2610.11111", "2610.15555", "2610.22222"]
-    assert "previous batch unavailable" in query
-    assert "2609.00001" in query
+    assert "excluded 1 cross-lists of papers announced earlier: 2609.00001" in query
 
 
 def test_a_batch_without_cross_lists_needs_no_previous_batch(monkeypatch):
@@ -397,13 +461,13 @@ def test_catchup_fetch_keeps_new_papers_and_new_cross_lists(monkeypatch):
         _section("Replacement", [_entry("2608.99999")]),
         total=3,
     )
-    requested = _serve(monkeypatch, {_catchup_url(TUE): tuesday, _catchup_url(MON): MONDAY_CATCHUP})
+    requested = _serve(monkeypatch, {_catchup_url(TUE): tuesday})
 
     query, papers = fetch_papers_from_catchup(
         base_url=None, categories=["quant-ph"], target_date=TUE, timeout_seconds=5
     )
 
-    assert requested == [_catchup_url(TUE), _catchup_url(MON)]
+    assert requested == [_catchup_url(TUE)]
     assert {paper.arxiv_id: paper.listing_section for paper in papers} == {
         "2610.11111": "new",
         "2610.15555": "cross",
@@ -453,22 +517,48 @@ def test_catchup_fetch_rejects_other_announcement_date(monkeypatch):
         )
 
 
-def test_announcement_batch_uses_listing_for_current_date(monkeypatch):
-    requested = _serve(monkeypatch, TUESDAY_PAGES)
+def test_announcement_batch_reads_the_requested_date_from_catchup(monkeypatch):
+    requested = _serve(monkeypatch, {_catchup_url(TUE): TUESDAY_CATCHUP})
+
+    query, papers, source = fetch_papers_from_announcement_batch(
+        base_url=None, categories=["quant-ph"], target_date=TUE, timeout_seconds=5
+    )
+
+    assert source == "catchup"
+    assert {paper.arxiv_id for paper in papers} == {"2610.11111", "2610.22222", "2610.15555"}
+    assert query.startswith(_catchup_url(TUE))
+    assert "excluded 1 cross-lists of papers announced earlier: 2609.00001" in query
+    # The listing page is not consulted at all when catch-up serves the date.
+    assert requested == [_catchup_url(TUE)]
+
+
+def test_announcement_batch_uses_catchup_when_the_listing_has_not_rolled_over(monkeypatch):
+    """Regression test for 2026-11-16.
+
+    The listing page still printed the previous batch's announcement date while the
+    requested date's catch-up page already held the complete batch. The listing date
+    must not be read as "this date has no announcement".
+    """
+    requested = _serve(
+        monkeypatch,
+        {
+            _catchup_url(TUE): TUESDAY_CATCHUP,
+            _catchup_url(MON): MONDAY_CATCHUP,
+            LISTING_URL: _listing_page(MON, _section("New", [_entry("2610.09999")]), total=2),
+        },
+    )
 
     _, papers, source = fetch_papers_from_announcement_batch(
         base_url=None, categories=["quant-ph"], target_date=TUE, timeout_seconds=5
     )
 
-    assert source == "list"
+    assert source == "catchup"
     assert len(papers) == 3
-    assert requested == [LISTING_URL, _catchup_url(MON)]
+    assert LISTING_URL not in requested
 
 
-def test_announcement_batch_falls_back_to_catchup_for_past_date(monkeypatch):
-    requested = _serve(
-        monkeypatch, {LISTING_URL: TUESDAY_LISTING, _catchup_url(MON): MONDAY_CATCHUP}
-    )
+def test_announcement_batch_reads_a_past_date_from_catchup_only(monkeypatch):
+    requested = _serve(monkeypatch, {_catchup_url(MON): MONDAY_CATCHUP})
 
     query, papers, source = fetch_papers_from_announcement_batch(
         base_url=None, categories=["quant-ph"], target_date=MON, timeout_seconds=5
@@ -477,23 +567,74 @@ def test_announcement_batch_falls_back_to_catchup_for_past_date(monkeypatch):
     assert source == "catchup"
     assert sorted(paper.arxiv_id for paper in papers) == ["2610.09999", "2610.10000"]
     assert query == _catchup_url(MON)
-    assert requested == [LISTING_URL, _catchup_url(MON)]
+    assert requested == [_catchup_url(MON)]
+
+
+def test_announcement_batch_falls_back_to_the_listing_when_catchup_is_empty(monkeypatch):
+    requested = _serve(
+        monkeypatch,
+        {
+            _catchup_url(TUE): _catchup_page(TUE, total=0),
+            LISTING_URL: TUESDAY_LISTING,
+            _catchup_url(MON): MONDAY_CATCHUP,
+        },
+    )
+
+    _, papers, source = fetch_papers_from_announcement_batch(
+        base_url=None, categories=["quant-ph"], target_date=TUE, timeout_seconds=5
+    )
+
+    assert source == "list"
+    assert len(papers) == 3
+    assert requested[:2] == [_catchup_url(TUE), LISTING_URL]
 
 
 def test_announcement_batch_rejects_unpublished_future_date(monkeypatch):
-    _serve(monkeypatch, TUESDAY_PAGES)
+    future = date(2026, 10, 22)
+    _serve(
+        monkeypatch,
+        {
+            _catchup_url(future): HTTPError(
+                _catchup_url(future), 400, "400 Client Error: Bad Request", None, None
+            ),
+            LISTING_URL: TUESDAY_LISTING,
+            _catchup_url(MON): MONDAY_CATCHUP,
+        },
+    )
 
-    with pytest.raises(RuntimeError, match="has no announcement batch"):
+    with pytest.raises(NoAnnouncementBatch, match="has no announcement batch") as excinfo:
         fetch_papers_from_announcement_batch(
-            base_url=None,
-            categories=["quant-ph"],
-            target_date=date(2026, 10, 22),
-            timeout_seconds=5,
+            base_url=None, categories=["quant-ph"], target_date=future, timeout_seconds=5
+        )
+    # A date newer than the newest batch must never look like an out-of-window date,
+    # which would send the CLI down the submittedDate-slice path.
+    assert not isinstance(excinfo.value, CatchupOutOfRange)
+
+
+def test_announcement_batch_reports_out_of_window_date_as_out_of_range(monkeypatch):
+    old_day = date(2025, 1, 15)
+    _serve(
+        monkeypatch,
+        {
+            _catchup_url(old_day): HTTPError(
+                _catchup_url(old_day), 400, "400 Client Error: Bad Request", None, None
+            ),
+            LISTING_URL: TUESDAY_LISTING,
+            _catchup_url(MON): MONDAY_CATCHUP,
+        },
+    )
+
+    with pytest.raises(CatchupOutOfRange, match="past 90 days"):
+        fetch_papers_from_announcement_batch(
+            base_url=None, categories=["quant-ph"], target_date=old_day, timeout_seconds=5
         )
 
 
 def test_announcement_batch_rejects_unreadable_listing_date(monkeypatch):
-    _serve(monkeypatch, {LISTING_URL: "<html>maintenance</html>"})
+    _serve(
+        monkeypatch,
+        {_catchup_url(TUE): _catchup_page(TUE, total=0), LISTING_URL: "<html>maintenance</html>"},
+    )
 
     with pytest.raises(RuntimeError, match="ambiguous date"):
         fetch_papers_from_announcement_batch(

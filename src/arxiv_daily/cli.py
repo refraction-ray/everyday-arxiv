@@ -9,6 +9,7 @@ from typing import Any
 
 from .announcement_batch import (
     CatchupOutOfRange,
+    NoAnnouncementBatch,
     build_catchup_url,
     build_listing_url,
     fetch_papers_from_announcement_batch,
@@ -50,9 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--date",
         default=None,
         help=(
-            "Announcement date, YYYY-MM-DD. Defaults to today. The current batch is read from "
-            "arxiv.org/list/<category>/new; a past one from arxiv.org/catchup/<category>/<date> "
-            "(the past 90 days)."
+            "Announcement date, YYYY-MM-DD. Defaults to today. That date's batch is read from "
+            "arxiv.org/catchup/<category>/<date> (the past 90 days); arxiv.org/list/<category>/new "
+            "is used only to name the newest batch or to serve it when its catch-up page is empty."
         ),
     )
     fetch.add_argument(
@@ -202,6 +203,10 @@ def run_fetch(args: argparse.Namespace) -> int:
             target_date=target_date,
             timeout_seconds=timeout_seconds,
         )
+    except NoAnnouncementBatch as exc:
+        # A weekend, a holiday, or a date whose batch is not out yet: report it as a
+        # one-line message rather than a traceback.
+        raise SystemExit(f"{exc}") from exc
     except CatchupOutOfRange as exc:
         if output_path.exists():
             raise RuntimeError(

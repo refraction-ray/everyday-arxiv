@@ -4,6 +4,8 @@ import gzip
 import io
 import re
 import tarfile
+import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Iterable
@@ -29,7 +31,42 @@ BROWSER_REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    # arXiv's CDN answers `Vary: Accept-Encoding`, so every encoding is cached as a
+    # separate copy, and the copies go stale at different times: on 2026-11-16 the
+    # gzip copy of one catch-up page held 44 new submissions while the uncompressed
+    # copy held 64. requests' default `gzip, deflate` reaches the compressed copy,
+    # so ask for the uncompressed one. `no-cache` does not help here: the response
+    # carries no Cache-Control for the CDN to revalidate against.
+    "Accept-Encoding": "identity",
 }
+# One batch fetch issues a burst of page requests (a paged listing plus up to
+# PREVIOUS_BATCH_LOOKBACK_DAYS catch-up pages), and arXiv answers excess burst
+# traffic with HTTP 429 rather than serving it. Pace requests and back off.
+MIN_REQUEST_INTERVAL_SECONDS = 3.0
+RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+MAX_REQUEST_ATTEMPTS = 5
+INITIAL_RETRY_DELAY_SECONDS = 15.0
+RETRY_DELAY_MULTIPLIER = 2.0
+MAX_RETRY_DELAY_SECONDS = 120.0
+
+
+class RequestPacer:
+    """Space out requests so a batch fetch does not trip arXiv's rate limiter."""
+
+    def __init__(self, min_interval_seconds: float) -> None:
+        self.min_interval_seconds = min_interval_seconds
+        self._lock = threading.Lock()
+        self._last_request_at = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            remaining = self.min_interval_seconds - (time.monotonic() - self._last_request_at)
+            if remaining > 0:
+                time.sleep(remaining)
+            self._last_request_at = time.monotonic()
+
+
+PACER = RequestPacer(MIN_REQUEST_INTERVAL_SECONDS)
 
 
 def strip_version(arxiv_id: str) -> str:
@@ -55,16 +92,44 @@ def fetch_html_page(url: str, *, timeout_seconds: int) -> str:
 
 
 def fetch_url(url: str, *, timeout_seconds: int) -> bytes:
-    """GET ``url``; an HTTP status error keeps its code as ``urllib.error.HTTPError``."""
+    """GET ``url``; an HTTP status error keeps its code as ``urllib.error.HTTPError``.
+
+    Rate limiting (429) and transient server errors are retried with exponential
+    backoff, which the retry finally gives up on by re-raising the status code.
+    """
     headers = {"User-Agent": BROWSER_USER_AGENT, **BROWSER_REQUEST_HEADERS}
+    delay = INITIAL_RETRY_DELAY_SECONDS
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        PACER.wait()
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout_seconds)
+            response.raise_for_status()
+            return response.content
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code not in RETRY_STATUS_CODES or attempt == MAX_REQUEST_ATTEMPTS:
+                raise HTTPError(url, status_code, str(exc), None, None) from exc
+            pause = _retry_delay(exc.response, delay)
+            print(
+                f"arXiv returned HTTP {status_code} for {url}; "
+                f"retrying in {pause:.0f}s ({attempt}/{MAX_REQUEST_ATTEMPTS - 1})."
+            )
+            time.sleep(pause)
+            delay = min(delay * RETRY_DELAY_MULTIPLIER, MAX_RETRY_DELAY_SECONDS)
+        except requests.RequestException as exc:
+            raise URLError(str(exc)) from exc
+    raise URLError(f"arXiv request failed after {MAX_REQUEST_ATTEMPTS} attempts: {url}")
+
+
+def _retry_delay(response: requests.Response | None, fallback: float) -> float:
+    """Honour a ``Retry-After`` header when arXiv sends one."""
+    if response is None:
+        return fallback
+    retry_after = response.headers.get("Retry-After") if response.headers else None
     try:
-        response = requests.get(url, headers=headers, timeout=timeout_seconds)
-        response.raise_for_status()
-        return response.content
-    except requests.HTTPError as exc:
-        raise HTTPError(url, exc.response.status_code, str(exc), None, None) from exc
-    except requests.RequestException as exc:
-        raise URLError(str(exc)) from exc
+        return min(float(retry_after), MAX_RETRY_DELAY_SECONDS) if retry_after else fallback
+    except (TypeError, ValueError):
+        return fallback
 
 
 def parse_feed(xml_bytes: bytes) -> list[Paper]:

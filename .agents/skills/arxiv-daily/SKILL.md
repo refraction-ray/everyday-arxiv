@@ -18,17 +18,11 @@ Use this skill for daily arXiv recommendations, close reading, cautious gated id
 
 ## Core Rules
 
-- Read the local profile before ranking. Use it for active topics, lower-priority topics, methods, citation anchors, email additions, and negative preferences. Do not hard-code one user's current topics in this skill.
-- If the profile is absent or incomplete, ask targeted questions instead of inventing durable preferences.
-- Run two independent screening tracks for every daily batch: (1) concrete value from matching the user's profile, and (2) an exceptional field-level-importance audit within the requested quantum category. The second track is an audit, not a daily recommendation quota. It normally produces zero papers and must not be used to fill, enrich, or diversify the daily list.
-- Field-level importance is deliberately breakthrough-level and extraordinarily sparse: expect zero on nearly every day and roughly at most one qualifying paper in a month as an order-of-magnitude prior, never as a target. Do not include a field-level item merely because it is elegant, rigorous, general within a subfield, experimentally impressive, or more important than average. A paper may enter through either track, and a paper that truly qualifies through both appears only once with both labels.
-- Rank profile-track papers by concrete value to the user, not broad keyword overlap. Rank field-level papers by prospective impact on the quantum-information field, independently of profile similarity; do not discard a genuinely important paper because it is outside the user's current direction.
-- Never invent papers. Load the fetched JSON, extract actual IDs, and verify every referenced paper exists in the source data before recommending, inspecting, or reporting it.
-- Recommend up to 10 papers, but do not pad weak matches or list non-recommended papers unless the user asks for diagnostics.
-- Generate both Markdown and HTML reports by default unless the user explicitly asks for only one format.
-- Markdown reports are English by default unless the user explicitly asks for another Markdown language. If the user gives the daily-scan request in Chinese, keep Markdown reports in English by default.
-- HTML reports should optimize readability for the user's request language. If the user gives the daily-scan request in Chinese, write the HTML report UI text and summaries in Chinese by default while preserving paper titles, author names, arXiv IDs, and email drafts in their natural/original language.
-- Do not spawn subagents, paper workers, or other delegated agents unless the user explicitly asks for subagents, delegation, parallel agents, or worker-based inspection in the current request. Depth, thoroughness, a full run, or daily recommendations do not count as permission to spawn subagents.
+- Read the local profile before ranking: active and lower-priority topics, methods, citation anchors, email additions, negative preferences. If it is absent or incomplete, ask targeted questions instead of inventing durable preferences.
+- Run the two screening tracks of the next section independently — concrete value to the user, and the sparse field-level-importance audit — and rank each by its own criterion rather than by broad keyword overlap.
+- Never invent papers: load the fetched JSON, extract actual IDs, and verify every referenced paper exists there before recommending, inspecting or reporting it.
+- Recommend up to 10 papers; do not pad weak matches, and do not list non-recommended papers unless the user asks for diagnostics.
+- Do not spawn subagents, paper workers or other delegated agents unless the user explicitly asks for them. Depth, thoroughness, a full run or a daily recommendation do not count as permission.
 
 ## Two Recommendation Tracks
 
@@ -64,7 +58,7 @@ Do not let a field-level label override the user's taste in an ordinary daily li
 
 Do not use famous authors, prestigious affiliations, a dramatic title, a press-release tone, broad keywords, a large but narrow numerical gain, or the absence of citations on a same-day paper as evidence of field-level importance. If the evidence is suggestive but does not clear the gate, keep the paper on the ordinary profile track when appropriate or omit it; do not label it a breakthrough. In reports, label qualifying entries `Field-Level Importance` or the equivalent Chinese label and state that this is a high-confidence prospective assessment. Do not use `field-changing` as an unqualified fact.
 
-The total recommendation limit remains 10. Field-level entries count toward that limit only when the exceptional gate is cleared; they should displace a profile-match paper only in that case. If no paper clears the gate, do not report a field-level candidate, shortlist, honorable mention, or “field-level suspect” merely to show that the audit was performed.
+Field-level entries count toward the same limit only when that gate is cleared, and displace a profile-match paper only then. If nothing clears it, do not report a candidate, shortlist, honorable mention or “field-level suspect” merely to show the audit was performed.
 
 ## Fetching And Paths
 
@@ -80,33 +74,31 @@ Every fetch selects by **announcement date**: the batch arXiv published on the r
 - A submission-date window therefore misses 30-50% of a Monday batch, and it also includes same-day submissions that will only be announced the next day.
 - Before the 20:00 ET announcement, the current date has no batch at all; that is expected, not a fetch failure.
 
-The CLI resolves the page itself. `arxiv.org/list/<category>/new` only ever holds the most recent batch, so the current date is read from it while a past date is read from that day's **catch-up page** (`arxiv.org/catchup/<category>/YYYY-MM-DD`). Both are requested with `abs=True`, so titles, authors, comments and abstracts come from the page and a batch fetch never depends on the API. Both verify the announcement date printed on the page. A batch is every paper first announced that day: the page's new submissions plus its cross-lists, tagged in the cache with `listing_section: "new"` or `"cross"`. Replacements are excluded. The cross-list section also carries papers announced on an earlier day that only now gained the category; since arXiv numbers submissions in one sequence, the CLI drops a cross-list whose ID is not above the previous batch's highest new-submission ID, and records the dropped IDs in the cache `query` field.
+**Which page serves the date.** The requested date is read from its **catch-up page** (`arxiv.org/catchup/<category>/YYYY-MM-DD`), which is indexed by announcement date and needs no pagination. `arxiv.org/list/<category>/new` mirrors only the newest batch and is regenerated later than the catch-up index, so the CLI uses it for two things only: naming the newest batch when the requested date has none, and serving that batch when the catch-up page is still empty. Do not conclude that a date has no batch from a listing page whose printed date is older — on 2026-11-16 the listing still showed the 2026-11-13 batch while the 2026-11-16 catch-up page already held the complete batch. Both pages are requested with `abs=True` and both have their printed announcement date verified, so titles, authors, comments and abstracts come from the page and a batch fetch never depends on the API.
 
-Two hard limits: arXiv serves catch-up pages only for the past 90 days, and a date on which arXiv announced nothing (weekend or holiday) has no batch, so no empty cache is written. If the requested date is newer than the newest batch, the CLI refuses.
+**What a batch is.** Every paper first announced that day: the page's new submissions plus its cross-lists, tagged in the cache as `listing_section: "new"` or `"cross"`. Replacements are excluded. The cross-list section also carries papers announced on an earlier day that only now gained the category; the CLI filters those locally, without reading a second page. A cross-list survives when its ID is at or above the batch's first new submission, or when it shares its `YYMM` with the batch's newest new submission — the same-month test keeps a genuine new cross-list submitted just before the batch's first new submission (2026-11-16: `2611.17366`), and keeps a first-of-month batch, whose submissions all carry the previous month's `YYMM`. Dropped IDs are recorded in the cache `query` field.
+
+**Stale copies, and pages that grow.** Both pages are cached by arXiv's CDN in copies keyed on `Accept-Encoding`, and the copies go stale at different times: on 2026-11-16 the compressed copy of one catch-up URL listed 44 new submissions while the uncompressed copy listed 64, each internally consistent with its own `(showing N of N entries)` figures, so nothing errors and the batch is silently undercounted. The client therefore requests `Accept-Encoding: identity`; a cache that carries 51 papers is the stale copy. A page can also gain entries later in the same day, so a same-day count is a snapshot, not a final figure: the same page went from 128 entries (`New 64`, `Cross 10`, `Replacement 54`) at 11:00 to 131 (`New 65`, `Cross 10`, `Replacement 56`) at 12:20, the addition being a submission from the previous Friday evening. If a count is in doubt, re-read the page and compare it against the figures the page prints.
+
+**Two hard limits.** arXiv serves catch-up pages only for the past 90 days, and a date on which arXiv announced nothing has no batch, so no empty cache is written. A catch-up request outside the window answers HTTP 400, and so does a request for a future date; the CLI tells them apart by comparing the requested date with the newest batch, and reports a missing batch as a single-line message naming that newest batch.
 
 A date older than the 90-day window cannot be rebuilt as a batch, because the API has no announcement-date field. For that case the CLI degrades to a **submitted-date slice**: it calls the arXiv API for `submittedDate=[D0000 TO D2359]` and writes the result with `source: "api-submitted-slice"` and `date_convention: "submitted_date_slice"`. This fallback only fires when no cache exists for that date; if one does, the CLI refuses rather than overwriting an announcement batch with a slice. A slice is not the batch, so:
 
-- Say so explicitly at the top of the Markdown report and in `Run Metadata`, naming the convention and what it misses: papers announced that day but submitted on earlier days (weekend and moderator-held submissions), plus papers submitted that day that belong to the next batch.
+- Say so explicitly at the top of the Markdown report and in `Run Metadata`, naming the convention and what it misses: papers announced that day but submitted on earlier days (weekend and moderator-held submissions), plus papers submitted that day that belong to the next day's batch.
 - Say so in your chat reply to the user, in the first sentence about the batch.
 - Never compare its `count` against a listing `(showing N of N entries)` figure, and never let it silently become the "today's arXiv" baseline.
 
-The arXiv API (`export.arxiv.org`) is never required for an announcement batch. It is used only for optional enrichment, which replaces the announcement-date placeholder with real submission timestamps, and for the out-of-window slice above. On networks where that host is blocked, pass `--no-api`, which disables both. When enrichment fails the fetch still succeeds, and the cache `query` field records the enrichment error; in that case `published` and `updated` hold the announcement date.
-
-For a non-network preview of the URLs and output path:
-
-```bash
-.conda/arxiv-daily/bin/arxiv-daily fetch --date YYYY-MM-DD --category quant-ph --dry-run
-```
+The only other role of the API (`export.arxiv.org`) is optional enrichment, which replaces the announcement-date placeholder with real submission timestamps; `--no-api` disables that and the slice, and is the right choice on networks where the host is unreachable. When enrichment fails the fetch still succeeds, the cache `query` records the error, and `published`/`updated` hold the announcement date.
 
 The whole batch is always collected. `--max-results N` is an explicit cap: the CLI prints a warning and appends `[truncated to N of M papers]` to the cache `query` field, so a capped cache can never be mistaken for a complete batch.
 
 For fetch failures (rate limiting, network errors, HTTP errors, parser errors, changed page structure), report the failure directly to the user with the requested date/category and the concrete error. Do not substitute a cached or adjacent-date batch unless the user explicitly asks for that after seeing the failure.
 
-Treat the generated JSON cache as the source of truth for recommendation work, and record it in `Run Metadata`: `source` is `list` for the current batch, `catchup` for a historical one, and `api-submitted-slice` for the out-of-window fallback, whose `date_convention` is then `submitted_date_slice`; the `query` field holds the URLs or search query actually used plus any excluded-cross-list, enrichment or truncation note. Do not recommend any paper unless it appears in the generated JSON cache.
+Treat the generated JSON cache as the source of truth for recommendation work, and record it in `Run Metadata`: `source` is `catchup` for the normal path, `list` when the catch-up page was empty and the listing served the newest batch, and `api-submitted-slice` for the out-of-window fallback, whose `date_convention` is then `submitted_date_slice`; the `query` field holds the URLs or search query actually used plus any excluded-cross-list, enrichment or truncation note. Do not recommend any paper unless it appears in the generated JSON cache.
 
 All generated paths use the announcement date, not the agent run date. That date is what the user means by "today's arXiv".
 
-Before starting metadata ranking, source inspection, citation checks, or report generation, check whether the resolved source date and category already have a recommendation report. If `data/reports/YYYY-MM-DD/recommendations.md` or `data/reports/YYYY-MM-DD/recommendations.html` exists and `run_metadata.json` identifies the same `source_date` and category, treat that batch as already processed. For an ordinary daily request on a date with no batch yet (before the 20:00 ET announcement, or a weekend/holiday), the CLI refuses and its error names the newest batch date; if that newest batch already has a report, stop and tell the user so, with links to the existing files. Do not reread, re-rank, redownload, or overwrite the report. Only rerun the workflow when the user explicitly requests a refresh, re-audit, updated citation check, or another material change, or when the existing report is incomplete or its metadata does not match the resolved batch.
+Before starting metadata ranking, source inspection, citation checks, or report generation, check whether the resolved source date and category already have a recommendation report. If `data/reports/YYYY-MM-DD/recommendations.md` or `data/reports/YYYY-MM-DD/recommendations.html` exists and `run_metadata.json` identifies the same `source_date` and category, treat that batch as already processed. For an ordinary daily request on a date with no batch yet (before the announcement, or a weekend/holiday), the CLI refuses and its message names the newest batch date; if that newest batch already has a report, stop and tell the user so, with links to the existing files. Do not reread, re-rank, redownload, or overwrite the report. Only rerun the workflow when the user explicitly requests a refresh, re-audit, updated citation check, or another material change, or when the existing report is incomplete or its metadata does not match the resolved batch.
 
 Required path structure:
 
@@ -134,34 +126,19 @@ Options:
 
 ## Staged Recommendation Workflow
 
-Use this workflow for accuracy and token efficiency:
+1. **Metadata pass.** Rank every cached paper from metadata only. The abstract lives under `summary`, not `abstract`; use `title`, `summary`, `categories`, `authors`, `comment`, and verify every referenced ID against the fetched JSON.
+2. **Screening.** Over the *complete* batch, run the field-level-importance screen separately from profile ranking — metadata may flag a suspect but cannot establish field-level importance. Then pick a bounded candidate set: roughly 5-12 profile-track papers, the citation-check suspects, and those few field-level suspects. Do not pad either track with weak papers.
+3. **Source inspection.** Download or reuse the candidates' sources with the CLI `download` command and apply the progressive gates locally. While reading each source, record its provenance from the title block (`\affiliation`, `\institute`, `\email`); the local profile decides what a weak or missing affiliation means for the shortlist, and that test only removes papers — a prestigious affiliation, author or title is never positive evidence of importance.
+4. **Aggregation.** Write one unified ranking. Mark each paper `Profile Match`, `Field-Level Importance`, or both; keep a qualifying field-level paper visible even when profile similarity is low; and verify citation-email evidence in the sources before it reaches `citation_alerts.md`.
 
-1. Metadata pass: rank all cached papers using only metadata fields from the fetched JSON. The abstract text is stored under the `summary` key, not `abstract`; use `title`, `summary`, `categories`, `authors`, and `comment`. Verify all referenced IDs against the fetched JSON.
-2. Candidate selection: choose roughly 5-12 promising profile-track papers, strong citation-check suspects, and a small number of field-level-importance suspects flagged by the metadata pass. Do not fill either track's quota with weak papers. A field-level suspect must receive source or full-text inspection even when it is not a profile match.
-3. Source acquisition and inspection: the main agent downloads or reuses selected candidates' source/full text when needed using the CLI `download` command, then applies the progressive gates locally. If subagents are explicitly requested, workers may own source acquisition for their assigned papers. To reduce repeated permission prompts, the main agent may prefetch sources for the bounded candidate set before spawning workers, but should not require this when worker-side source acquisition is more natural. If, and only if, the user explicitly requests subagents or worker-based parallel inspection, spawn one paper worker per selected candidate whenever subagents are supported by the active session.
-4. Final aggregation: combine the gathered evidence into one unified ranking. The main agent decides final order and writes the user-facing reports. When explicit paper workers were used, aggregate their evidence instead of treating their output as final.
-
-Paper workers are optional, not the default. Do not spawn workers for ordinary daily-run, full-run, or quick-diagnostic requests unless the user explicitly asks for subagents, delegation, parallel agents, or workers. When workers are explicitly requested, do not spawn workers for every fetched paper; only use the bounded candidate set selected after the metadata pass.
-
-## Main-Agent Responsibilities
-
-- Read the profile and perform the metadata-only ranking over all cached papers.
-- Perform the field-level-importance screen over the complete fetched batch, separately from profile ranking. Flag only a small number of plausible suspects for source/full-text inspection, and do not infer field-level importance from metadata alone.
-- Select the bounded candidate paper set for source/full-text inspection.
-- Download or inspect candidate sources locally unless the user explicitly requested subagents.
-- When subagents are requested, decide explicitly whether sources are prefetched by the main agent or acquired by workers. If workers should download, say so in the worker prompt and constrain downloads to the assigned arXiv source/PDF only.
-- If the user explicitly requested subagents and they are supported, spawn workers in parallel, assigning exactly one paper to each worker.
-- Use `templates/paper_subagent_prompt.md` only when calling explicitly requested subagents.
-- Continue non-overlapping work while explicitly requested workers inspect sources.
-- Verify citation-email evidence before including it in `citation_alerts.md`.
-- Follow the same staged gates locally within the main agent whenever workers are not explicitly requested, unavailable, or failed.
-- Aggregate the two recommendation tracks without letting profile similarity hide a qualifying field-level paper. Mark each final paper with its track: `Profile Match`, `Field-Level Importance`, or both. Explain the field-level judgment and its caveats separately from the user-specific connection.
+Paper workers are optional, not the default: spawn them only when the user explicitly asks for subagents, delegation, parallel agents or workers, and only for the bounded candidate set — never one per fetched paper.
 
 ## Optional Paper-Worker Subagent Responsibilities
 
-This section applies only when the user explicitly requested subagents, delegation, parallel agents, or worker-based paper inspection in the current request.
+This section applies only when the user explicitly requested subagents, delegation, parallel agents, or worker-based paper inspection in the current request. Call them with `templates/paper_subagent_prompt.md`.
 
 - Handle exactly one paper and return structured evidence, not a polished report.
+- The main agent decides whether it prefetches sources for the candidate set (fewer permission prompts) or lets workers acquire their own, says which in the worker prompt, and constrains downloads to the assigned paper. Keep non-overlapping work going while workers inspect, then aggregate their evidence instead of treating it as final.
 - Apply progressive gates: relevance first, citation check only if strongly related, close reading only if genuinely promising.
 - Stop early for weak or merely keyword-level matches and return a short low-priority assessment.
 - Own source/full-text acquisition for the assigned paper when it is needed for close reading or citation checks. Reuse an existing `SOURCE_TREE` first; otherwise download and extract the assigned arXiv source or PDF into `data/raw/arxiv/YYYY-MM-DD/sources/ARXIV_ID/` using the CLI command: `.conda/arxiv-daily/bin/arxiv-daily download ARXIV_ID`.
@@ -237,40 +214,13 @@ Do not mention papers that neither need an email nor already cite relevant user 
 
 ## Citation Email Style
 
-- **Bibliographic Integrity**: To prevent hallucination of author names, publications, or journals in the email drafts, the agent MUST explicitly lookup the exact bibliographic metadata of the relevant prior paper from `user_profile/papers.local.jsonl` (using a keyword or title query) rather than relying on parametric memory.
+Where the local profile states its own citation-email style — subject, salutation, sign-off, topic-specific additions — the profile wins; the defaults below apply only where it is silent.
 
-Before drafting, extract public contact emails from the paper source or text when available. Search `.tex`, `.bbl`, `.bib`, and extracted PDF text for `\email{...}`, `mailto:`, `email`, `corresponding author`, and raw email patterns. Do not search for private contact information outside the paper/source unless the user explicitly asks.
-
-Put the best public contact above the draft:
-
-```text
-To: contact@example.edu
-```
-
-Prefer corresponding-author or `\email{...}` addresses. If several emails are found and no corresponding author is clear, list them all or choose the most likely contact and note the evidence in `Run Metadata`.
-
-Use this default subject with the target paper's bare arXiv ID:
-
-```text
-On your work arXiv:XXXX.XXXXX
-```
-
-Use this default salutation unless a specific recipient is known:
-
-```text
-Dear colleagues,
-```
-
-Emails should be concise, courteous, professional, and usually indirect:
-
-- Open with `With great interest, I read...` and name a concrete technical point from the target paper.
-- Do not explicitly say `overlap`, `overlaps with our work`, or similar direct phrasing in the email body.
-- Instead, describe the target paper's theme or technical emphasis, then introduce the user's related work as complementary context, a potentially useful reference, or an additional perspective.
-- Prefer phrases such as `related context`, `complementary perspective`, `may provide a useful angle`, or `in case it is helpful for a future version`.
-- Avoid directly asking for a citation unless the omission is exceptionally central and obvious.
-- Prefer wording such as `may be useful`, `might be relevant`, or `in case it is helpful for a future version`.
-- Include profile-defined topic or software email additions when relevant.
-- For QAS-related emails, if the local profile specifies DQAS as the first paper to introduce quantum architecture search, explicitly say this in the draft while keeping the tone courteous. Example: `To the best of my knowledge, our DQAS paper was the first work to introduce the quantum architecture search (QAS) concept, and it may provide useful background for your discussion.`
+- **Bibliographic integrity.** Look up every cited prior paper's exact metadata in `user_profile/papers.local.jsonl` (keyword or title query) instead of relying on memory, so author lists, venues and years in the draft are the user's real ones.
+- **Contact address.** Extract a public contact from the paper's own source or text: `\email{...}`, `mailto:`, `corresponding author`, and raw address patterns in `.tex`, `.bbl`, `.bib`, or the extracted PDF text. Prefer the corresponding author's `\email{...}`; if several are equally likely, list them or pick the most likely and note the evidence in `Run Metadata`. Do not look for private contact information outside the paper unless the user asks.
+- **Format.** Put the best contact above the draft as `To: contact@example.edu`. Default subject `On your work arXiv:XXXX.XXXXX` with the bare ID; default salutation `Dear colleagues,`.
+- **Tone.** Concise, courteous, indirect. Open with `With great interest, I read...` and one concrete technical point from the target paper, then describe its theme and introduce the user's own work as complementary context — `related context`, `complementary perspective`, `may provide a useful angle`, `in case it is helpful for a future version`. Never write "overlap", and do not ask for a citation outright unless the omission is exceptional and obvious.
+- **Priority anchors.** When the profile designates a paper as a priority anchor for the target's topic (first to introduce a concept, standard software for a task), say so plainly and courteously, e.g. "to the best of my knowledge, our X was the first work to introduce ...". The profile carries the wording rules per anchor.
 
 ## Report Format
 
@@ -301,19 +251,11 @@ HTML citation report requirements:
 - Keep HTML citation-alert prose concise: say that the relevant user work is not cited and why the target paper is in scope. Do not include detailed source-search, grep, or bibliography-search diagnostics in HTML; keep that evidence in Markdown `citation_alerts.md` and/or `run_metadata.json`.
 - Preserve the email draft formatting using a `<pre>` or equivalent preformatted block.
 
-Recommendation reports:
+Markdown reports:
 
-- Start directly with ranked recommended papers.
-- Make the recommendation track visible for every paper (`Profile Match`, `Field-Level Importance`, or both). Keep field-level papers prominent even when their user-profile relevance is weak, and explain their prospective broad impact in a dedicated sentence or paragraph.
-- Put source cache, profile files, run date, and date-convention notes under a final `Run Metadata` section.
-
-Citation reports:
-
-- Start directly with `Needs Email`.
-- Include extracted `To:` email addresses for email-worthy papers when public contacts are present.
-- Put source cache, inspected files, profile files, and date notes under a final `Run Metadata` section.
-
-If structured provenance is useful, create a sidecar `run_metadata.json`.
+- `recommendations.md` starts with the ranked papers, each labelled `Profile Match`, `Field-Level Importance`, or both — a field-level paper stays prominent even when its profile relevance is weak, with its prospective broad impact in its own sentence.
+- `citation_alerts.md` starts with `Needs Email`, then `Already Cites User Work: No Email Needed`, and carries the extracted `To:` addresses.
+- Both end with a `Run Metadata` section — source cache, inspected files, profile files, run date, date-convention notes — mirrored by the sidecar `run_metadata.json`.
 
 ## Token And Runtime Discipline
 
@@ -335,13 +277,6 @@ After code changes, run:
 
 After report generation, verify:
 
-- Reports are under the arXiv source-date folder.
-- Batch completeness: read `count` from the metadata JSON (never `len()` of the top-level object). For an announcement batch (`date_convention: "announcement_batch"`), it should equal the `New submissions (showing N of N entries)` figure plus the `Cross submissions` figure on the listing or catch-up page the cache records in `query`, minus the cross-lists the `query` note says were excluded; a lower count means the batch was capped. A `submitted_date_slice` cache has no such figure and must not be compared with one. A cache whose `query` contains a truncation or enrichment note is not a plain complete batch.
-- `recommendations.html` exists, is titled `Everyday arXiv 推荐`, and its top-list links jump to matching paper-card IDs.
-- HTML visible arXiv IDs and same-page anchors use bare IDs without `vN` suffixes.
-- Each recommended paper in the HTML includes an arXiv abstract-page link.
-- HTML reports do not include bottom metadata/footer provenance blocks.
-- Recommendation report starts with recommended papers.
-- Field-level recommendations, when present, have an explicit track label and a concrete evidence-and-limitations explanation; an ordinary daily report does not imply that one must be present.
-- Citation report starts with email-worthy items.
-- Markdown metadata is at the bottom or metadata is in sidecar JSON.
+- Reports sit under the source-date folder, and `count` matches the page figures: `New` + `Cross` from the page named in `query`, minus any cross-lists the note lists. A `submitted_date_slice` cache has no such figure to compare, and a cache whose `query` carries a truncation or enrichment note is not a plain complete batch.
+- `recommendations.html` is titled `Everyday arXiv 推荐`, its top list jumps to matching card ids, visible IDs and anchors are bare (no `vN`), every paper has an abstract-page link, and there is no bottom provenance block.
+- `recommendations.md` opens with the ranking and labels each paper's track; `citation_alerts.md` opens with `Needs Email`; both end in `Run Metadata` or a sidecar `run_metadata.json`.

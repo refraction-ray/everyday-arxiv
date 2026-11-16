@@ -1,10 +1,19 @@
 """Announcement-batch selection: the papers arXiv announced on one date.
 
 arXiv announces papers in daily batches: a paper becomes visible on the day its
-batch is announced, not on the day it was submitted. ``arxiv.org/list/<category>/new``
-shows the most recent batch only, while ``arxiv.org/catchup/<category>/<date>``
-serves one specific past day (the past 90 days). Both are read with ``abs=True``,
-so the page itself carries titles, authors, comments, subjects and abstracts.
+batch is announced, not on the day it was submitted. ``arxiv.org/catchup/<category>/<date>``
+serves exactly one day's batch (the past 90 days) and is indexed by the date it was
+announced, while ``arxiv.org/list/<category>/new`` only ever mirrors the newest
+batch. Both are read with ``abs=True``, so the page itself carries titles, authors,
+comments, subjects and abstracts.
+
+The requested date is therefore served from the catch-up page, with ``/new`` kept
+for the two jobs it does better: naming the newest batch when the requested date
+has none, and serving that batch if the catch-up page has not filled in yet. The
+listing page is regenerated later than the catch-up index — on 2026-11-16 the
+listing still showed the 2026-11-13 batch while the 2026-11-16 catch-up page
+already held the complete batch — so the listing cannot be trusted to tell you
+that a date has no announcement.
 
 A batch is the page's new submissions plus its cross-lists, i.e. every paper first
 announced that day whose subjects include the category. Replacements are left
@@ -20,7 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from html import unescape
 from typing import Callable
 from urllib.error import HTTPError
@@ -46,7 +55,6 @@ SECTION_HEADER_PATTERN = (
 )
 TOTAL_ENTRIES_PATTERN = r"Total of (\d+) entries"
 BATCH_SECTIONS = {"New": "new", "Cross": "cross"}
-PREVIOUS_BATCH_LOOKBACK_DAYS = 10
 
 # Section kind -> (entries the section announces in total, entries read so far).
 Sections = dict[str, tuple[int, list[tuple[str, str]]]]
@@ -56,6 +64,14 @@ CategoryCollector = Callable[[str, dict[str, Paper]], list[str]]
 
 class CatchupOutOfRange(RuntimeError):
     """The requested date is older than arXiv's catch-up window."""
+
+
+class NoAnnouncementBatch(RuntimeError):
+    """arXiv announced no batch for the requested date.
+
+    Either the date is a weekend or holiday, or it is today and its batch appears
+    only after the 20:00 ET announcement.
+    """
 
 
 def build_listing_url(
@@ -86,12 +102,49 @@ def fetch_papers_from_announcement_batch(
     target_date: date,
     timeout_seconds: int,
 ) -> tuple[str, list[Paper], str]:
-    """Fetch the batch announced on ``target_date`` from ``/new`` or from catch-up.
+    """Fetch the batch announced on ``target_date``, catch-up page first.
 
     Returns the query, the papers and the page kind used (``list`` or
     ``catchup``). ``base_url`` is the arXiv API used to enrich submission
     timestamps; ``None`` skips enrichment. Raises ``CatchupOutOfRange`` when the
-    date is older than the catch-up window.
+    date is older than the catch-up window and ``NoAnnouncementBatch`` when arXiv
+    announced nothing that day.
+    """
+    try:
+        query, papers = fetch_papers_from_catchup(
+            base_url=base_url,
+            categories=categories,
+            target_date=target_date,
+            timeout_seconds=timeout_seconds,
+        )
+    except (CatchupOutOfRange, NoAnnouncementBatch) as catchup_error:
+        return _fetch_after_catchup_miss(
+            base_url=base_url,
+            categories=categories,
+            target_date=target_date,
+            timeout_seconds=timeout_seconds,
+            catchup_error=catchup_error,
+        )
+    return query, papers, "catchup"
+
+
+def _fetch_after_catchup_miss(
+    *,
+    base_url: str | None,
+    categories: list[str],
+    target_date: date,
+    timeout_seconds: int,
+    catchup_error: RuntimeError,
+) -> tuple[str, list[Paper], str]:
+    """Resolve a request whose catch-up page held nothing.
+
+    ``/new`` mirrors only the newest batch, so it can serve the request only when
+    the newest batch is the requested one — either because the catch-up index is
+    lagging behind it, or because the requested date is that newest batch and its
+    catch-up page has not filled in yet. Otherwise the failure is reported against
+    the newest batch, except for a date the catch-up window cannot reach, where the
+    original ``CatchupOutOfRange`` is re-raised so the caller can degrade to a
+    submittedDate slice.
     """
     first_category = categories[0]
     first_html = fetch_html_page(
@@ -112,19 +165,15 @@ def fetch_papers_from_announcement_batch(
             first_pages={first_category: first_html},
         )
         return query, papers, "list"
-    if listing_date < target_date:
-        raise RuntimeError(
-            f"arxiv.org has no announcement batch for {target_date.isoformat()}; the newest "
-            f"batch is {listing_date.isoformat()}. If {target_date.isoformat()} is today, its "
-            "batch appears only after the 20:00 ET announcement."
-        )
-    query, papers = fetch_papers_from_catchup(
-        base_url=base_url,
-        categories=categories,
-        target_date=target_date,
-        timeout_seconds=timeout_seconds,
+    if isinstance(catchup_error, CatchupOutOfRange) and target_date < listing_date:
+        # Older than the newest batch and still rejected by the catch-up page: the
+        # date is beyond the catch-up window, not an announcement-free day.
+        raise catchup_error
+    raise NoAnnouncementBatch(
+        f"arxiv.org has no announcement batch for {target_date.isoformat()}; the newest "
+        f"batch is {listing_date.isoformat()}. arXiv announces no papers on weekends and "
+        f"holidays, and a same-day batch appears only after the 20:00 ET announcement."
     )
-    return query, papers, "catchup"
 
 
 def fetch_papers_from_listing(
@@ -144,7 +193,6 @@ def fetch_papers_from_listing(
     return _fetch_batch(
         base_url=base_url,
         categories=categories,
-        target_date=target_date,
         timeout_seconds=timeout_seconds,
         collect=lambda category, papers_by_id: _collect_listing_category(
             category,
@@ -167,7 +215,6 @@ def fetch_papers_from_catchup(
     return _fetch_batch(
         base_url=base_url,
         categories=categories,
-        target_date=target_date,
         timeout_seconds=timeout_seconds,
         collect=lambda category, papers_by_id: _collect_catchup_category(
             category,
@@ -182,7 +229,6 @@ def _fetch_batch(
     *,
     base_url: str | None,
     categories: list[str],
-    target_date: date,
     timeout_seconds: int,
     collect: CategoryCollector,
 ) -> tuple[str, list[Paper]]:
@@ -191,12 +237,7 @@ def _fetch_batch(
     for category in categories:
         urls.extend(collect(category, papers_by_id))
 
-    papers, cross_list_note = _drop_cross_lists_of_earlier_papers(
-        list(papers_by_id.values()),
-        category=categories[0],
-        target_date=target_date,
-        timeout_seconds=timeout_seconds,
-    )
+    papers, cross_list_note = _drop_cross_lists_of_earlier_papers(list(papers_by_id.values()))
     papers, enrichment_error = _enrich_submission_timestamps(
         base_url=base_url,
         papers=papers,
@@ -259,7 +300,7 @@ def _collect_catchup_category(
         category, target_date=target_date, page=page, timeout_seconds=timeout_seconds
     )
     if sections is None:
-        raise RuntimeError(
+        raise NoAnnouncementBatch(
             f"arXiv published no announcement batch for {category} on "
             f"{target_date.isoformat()}; it announces no papers on weekends and holidays, so no "
             "batch cache is written. Pick a date that has a batch: the newest one is whatever "
@@ -342,78 +383,56 @@ def _store_sections(
 
 
 def _drop_cross_lists_of_earlier_papers(
-    papers: list[Paper], *, category: str, target_date: date, timeout_seconds: int
+    papers: list[Paper],
 ) -> tuple[list[Paper], str | None]:
-    """Keep a cross-list only when the paper itself is new in this batch.
+    """Keep a cross-list unless its paper was announced in an earlier batch.
 
     The cross-list section also carries papers announced on an earlier day that
     have only now been cross-listed into the category. arXiv numbers submissions
-    in one sequence across all archives, so a paper submitted after the previous
-    batch closed has a higher ID than every new submission of that batch, while
-    an earlier paper does not. Returns the kept papers and a note for the query.
+    in one sequence across all archives, so a paper from an earlier batch sits
+    below the IDs of this batch. Two local tests together stand in for reading
+    that earlier batch, which would cost an extra catch-up page per day (three of
+    them on a Monday) and would be skewed by a stale CDN copy of it:
+
+    - inside the window: ID at or above this batch's first new submission;
+    - same month: the ID shares its ``YYMM`` with this batch's newest new
+      submission. A paper numbered in the batch's own month is at worst a
+      same-month paper cross-listed late, which is cheap to tolerate.
+
+    The second test is what keeps a genuine new cross-list whose paper was
+    submitted just before the batch's first new submission — the case on
+    2026-11-16, where 2611.17366 was submitted after the Friday cut-off and
+    appeared as a cross-list below every new submission of the Monday batch. It
+    also keeps the filter safe on the first batch of a month, whose submissions
+    all carry the previous month's ``YYMM``.
     """
     if not any(paper.listing_section == "cross" for paper in papers):
         return papers, None
 
-    previous_last = _previous_batch_last_id(
-        category, target_date=target_date, timeout_seconds=timeout_seconds
-    )
-    if previous_last is not None:
-        floor, inclusive, note = previous_last, False, ""
-    else:
-        new_keys = [_id_key(paper.arxiv_id) for paper in papers if paper.listing_section == "new"]
-        if not new_keys:
-            return (
-                papers,
-                "[cross-lists unfiltered: no previous batch or new submission to compare]",
-            )
-        floor, inclusive = min(new_keys), True
-        note = (
-            "[previous batch unavailable, so cross-lists were kept from this batch's first new "
-            "submission ID on, which can drop a few new ones]"
+    new_keys = [_id_key(paper.arxiv_id) for paper in papers if paper.listing_section == "new"]
+    if not new_keys:
+        return (
+            papers,
+            "[cross-lists unfiltered: no new submission to compare against]",
         )
+    floor = min(new_keys)
+    batch_month = max(new_keys)[0]
+    note = ""
 
     kept: list[Paper] = []
     dropped: list[str] = []
     for paper in papers:
         key = _id_key(paper.arxiv_id)
-        if paper.listing_section != "cross" or key > floor or (inclusive and key == floor):
+        if paper.listing_section != "cross" or key >= floor or key[0] >= batch_month:
             kept.append(paper)
         else:
             dropped.append(paper.arxiv_id)
     if dropped:
         note = (
-            f"{note} [excluded {len(dropped)} cross-lists of papers announced earlier: "
+            f"[excluded {len(dropped)} cross-lists of papers announced earlier: "
             f"{', '.join(sorted(dropped))}]"
-        ).strip()
+        )
     return kept, note or None
-
-
-def _previous_batch_last_id(
-    category: str, *, target_date: date, timeout_seconds: int
-) -> tuple[int, int] | None:
-    """Return the highest new-submission ID of the batch before ``target_date``."""
-    for days_back in range(1, PREVIOUS_BATCH_LOOKBACK_DAYS + 1):
-        day = target_date - timedelta(days=days_back)
-        try:
-            sections = _read_catchup_sections(
-                category,
-                target_date=day,
-                page=f"catch-up page for {category} on {day.isoformat()}",
-                timeout_seconds=timeout_seconds,
-            )
-        except CatchupOutOfRange:
-            return None
-        if sections is None:
-            continue
-        ids = [
-            arxiv_id
-            for dt_block, _ in sections.get("New", (0, []))[1]
-            if (arxiv_id := _first_match(r'href\s*=\s*"/abs/([^"]+)"', dt_block)) is not None
-        ]
-        if ids:
-            return max(_id_key(arxiv_id) for arxiv_id in ids)
-    return None
 
 
 def _id_key(arxiv_id: str) -> tuple[int, int]:

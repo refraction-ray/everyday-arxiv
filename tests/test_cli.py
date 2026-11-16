@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from arxiv_daily.announcement_batch import CatchupOutOfRange
+from arxiv_daily.announcement_batch import CatchupOutOfRange, NoAnnouncementBatch
 from arxiv_daily.cli import _fetch_paper_date_from_api, _find_paper_date_locally, main
 from arxiv_daily.models import Paper
 from arxiv_daily.submitted_slice import build_submitted_slice_query, fetch_submitted_slice
@@ -98,6 +98,22 @@ def test_cli_reports_an_explicit_max_results_cap(monkeypatch, tmp_path, capsys):
     cache = _read_cache(tmp_path, "2026-10-22")
     assert cache["count"] == 2
     assert "truncated to 2 of 3 papers" in cache["query"]
+
+
+def test_no_batch_is_reported_as_a_one_line_message(monkeypatch, tmp_path, capsys):
+    def raise_no_batch(**kwargs):
+        raise NoAnnouncementBatch(
+            "arxiv.org has no announcement batch for 2026-10-24; the newest batch is 2026-10-20."
+        )
+
+    monkeypatch.setattr("arxiv_daily.cli.fetch_papers_from_announcement_batch", raise_no_batch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _fetch(tmp_path, "2026-10-24")
+
+    assert "has no announcement batch for 2026-10-24" in str(excinfo.value)
+    assert "Traceback" not in capsys.readouterr().err
+    assert not (tmp_path / "2026-10-24").exists()
 
 
 def test_out_of_range_falls_back_to_a_submitted_slice(monkeypatch, tmp_path, capsys):
