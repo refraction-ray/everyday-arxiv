@@ -150,12 +150,26 @@ This section applies only when the user explicitly requested subagents, delegati
 
 For top-ranked papers, read source, abstract page, or full text when possible. The strongest profile-match entries should usually get two to three paragraphs explaining:
 
-- What the paper actually does.
+- What the paper actually does, at the level of the explanation standard below.
 - Why it matches the user's profile.
 - Which user paper, method, software, or theme it connects to.
 - Whether it suggests a concrete future direction.
 
 Use shorter summaries for weaker matches or when the abstract is sufficient.
+
+### Explanation Standard: Write For A Coarse Reproducer
+
+Every user-facing explanation of a paper — a chat walkthrough, a close-reading paragraph, or a report card — addresses the user as a *coarse reproducer*: someone who wants to rebuild the paper's result roughly and judge whether the idea holds, not someone who will clone the code or audit individual runs. State the following five things explicitly, in the paper's own terms:
+
+1. **What is implemented** — the model or system being constructed or simulated (Hamiltonian, circuit family, ansatz, algorithm, platform) and the paper's concrete object of study.
+2. **Which numerical method** — the algorithm that actually produces the result (for example DMRG/MPS contraction, QMC, exact diagonalization, Monte Carlo sampling, a gradient estimator, an optimization loop), and the assumption that makes it work.
+3. **Which quantity is computed** — the observable, benchmark, or figure of merit, and how it is estimated.
+4. **What that quantity varies with** — the relation or trend, ideally with its regime and scaling (system size, depth, noise, temperature, bond dimension, sample count), and whether the statement is exact, a scaling argument, or an empirical curve.
+5. **What physics the variation means.**
+
+Do not let a vague closing physical image stand in for items 1–4. A sentence such as “this reflects the rich interplay of entanglement and disorder” is acceptable only after the model, method, computed quantity, and its dependence have been stated concretely; it never replaces them. If one of these layers is genuinely unclear in the paper, say so explicitly rather than covering it with generic physics prose.
+
+Deliberately omit hyperparameters, individual numerical values from specific runs, and random seeds unless the reader needs them to reproduce the setup or the number *is* the result (a threshold, an exponent, an error rate). The accuracy of the abstract layer matters more than the completeness of the numerical detail.
 
 Every paper recommended through the field-level-importance track requires enough source or full-text inspection to support the high-bar gate, even if it is not closely related to the user's work. Its summary should explain the concrete result, the mechanism or capability that may have broad consequences, the likely affected subfields or bottleneck, and the key limitations. Keep this assessment distinct from any user-profile connection.
 
@@ -227,6 +241,8 @@ Where the local profile states its own citation-email style — subject, salutat
 ## Report Format
 
 User-facing reports start with useful results, not metadata.
+
+Every close-reading paragraph, Markdown summary, and HTML card follows the Explanation Standard above: the reader is a coarse reproducer, so give the model, method, computed quantity, its variation and the corresponding physics, not hyperparameters or seeds.
 
 Generate Markdown and HTML reports in parallel unless the user explicitly asks for only one format. Use the embedded template at `templates/daily_report_template.html` as the only source of truth for the HTML visual structure and styling. The generated HTML should be plain static HTML with no external JavaScript or remote assets.
 
